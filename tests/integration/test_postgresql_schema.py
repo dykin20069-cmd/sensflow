@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -122,6 +122,80 @@ def test_append_only_and_completed_immutability_triggers_reject_updates(
                     stored_order = await session.get(ClientOrder, order_id)
                     assert stored_order is not None
                     stored_order.requested_robux = 2000
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_customer_roblox_ids_allow_multiple_nulls_and_reject_duplicate_real_ids(
+    postgresql_url: str,
+) -> None:
+    async def scenario() -> None:
+        engine = create_async_engine(postgresql_url)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        now = datetime.now(UTC)
+        try:
+            async with sessions.begin() as session:
+                session.add_all(
+                    [
+                        Customer(
+                            roblox_user_id=None,
+                            current_username="ManualCustomerOne",
+                            current_place_id=810_001,
+                            last_activity=now,
+                        ),
+                        Customer(
+                            roblox_user_id=None,
+                            current_username="ManualCustomerTwo",
+                            current_place_id=810_002,
+                            last_activity=now,
+                        ),
+                        Customer(
+                            roblox_user_id=910_001,
+                            current_username="VerifiedCustomer",
+                            current_place_id=810_003,
+                            last_activity=now,
+                        ),
+                    ]
+                )
+
+            with pytest.raises(DBAPIError):
+                async with sessions.begin() as session:
+                    session.add(
+                        Customer(
+                            roblox_user_id=910_001,
+                            current_username="DuplicateVerifiedCustomer",
+                            current_place_id=810_004,
+                            last_activity=now,
+                        )
+                    )
+
+            with pytest.raises(DBAPIError):
+                async with sessions.begin() as session:
+                    session.add(
+                        Customer(
+                            roblox_user_id=-1,
+                            current_username="InvalidVerifiedCustomer",
+                            current_place_id=810_005,
+                            last_activity=now,
+                        )
+                    )
+
+            async with sessions() as session:
+                null_count = await session.scalar(
+                    select(func.count())
+                    .select_from(Customer)
+                    .where(Customer.roblox_user_id.is_(None))
+                )
+                verified_count = await session.scalar(
+                    select(func.count())
+                    .select_from(Customer)
+                    .where(Customer.roblox_user_id == 910_001)
+                )
+
+            assert null_count == 2
+            assert verified_count == 1
         finally:
             await engine.dispose()
 

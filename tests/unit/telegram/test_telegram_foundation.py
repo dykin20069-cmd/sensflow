@@ -1,6 +1,7 @@
 """Tests for the aiogram presentation foundation."""
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
@@ -137,6 +138,7 @@ def test_renderers_escape_content_and_use_service_supplied_actions() -> None:
 
     order_screen = render_order_details(order)
     customer_screen = render_customer_details(customer)
+    manual_customer_screen = render_customer_details(replace(customer, roblox_user_id=None))
 
     assert "&lt;operator&gt;" in order_screen.text
     assert "Confirm Payment" in str(order_screen.reply_markup)
@@ -145,6 +147,7 @@ def test_renderers_escape_content_and_use_service_supplied_actions() -> None:
     assert "&lt;customer&gt;" in customer_screen.text
     assert "A &amp; B" in customer_screen.text
     assert "Update Place ID" in str(customer_screen.reply_markup)
+    assert "Roblox User ID: Not verified" in manual_customer_screen.text
     assert format_decimal(Decimal("0.0000")) == "0"
 
 

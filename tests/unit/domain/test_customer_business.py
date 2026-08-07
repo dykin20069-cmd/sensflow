@@ -9,6 +9,7 @@ from sensflow.domain.customer.service import (
     RobloxIdentity,
     archive_customer,
     create_customer,
+    create_manual_customer,
     refresh_identity,
     update_place_id,
 )
@@ -36,6 +37,25 @@ def test_customer_is_created_only_from_verified_identity() -> None:
     assert customer.current_username == "Builderman"
     assert customer.current_place_id == 100
     assert customer.last_activity == NOW
+
+
+def test_manual_customer_is_created_without_a_fake_roblox_identity() -> None:
+    customer = create_manual_customer(" ManualCustomer ", 100, NOW)
+
+    assert customer.roblox_user_id is None
+    assert customer.current_username == "ManualCustomer"
+    assert customer.current_place_id == 100
+
+
+def test_first_verified_refresh_links_a_manual_customer_identity() -> None:
+    customer = create_manual_customer("ManualCustomer", 100, NOW)
+
+    history = refresh_identity(customer, RobloxIdentity(42, "VerifiedCustomer"), NOW)
+
+    assert customer.roblox_user_id == 42
+    assert customer.current_username == "VerifiedCustomer"
+    assert history is not None
+    assert history.username == "ManualCustomer"
 
 
 def test_username_refresh_preserves_the_previous_name_exactly_once() -> None:

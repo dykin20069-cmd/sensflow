@@ -7,6 +7,7 @@ from aiogram.types import CallbackQuery, Message
 from sensflow.application.commands import CreateOrderCommand, PrepareCreateOrderCommand
 from sensflow.application.errors import ApplicationError, InputValidationError
 from sensflow.application.ports import OrderUseCases
+from sensflow.application.queries import GetOrderQuery
 from sensflow.application.validation import (
     validate_input,
     validate_positive_integer,
@@ -15,13 +16,16 @@ from sensflow.application.validation import (
 from sensflow.presentation.telegram.callbacks import (
     MainSection,
     MenuCallback,
-    OrderCallback,
-    OrderCallbackAction,
 )
 from sensflow.presentation.telegram.errors import show_error
 from sensflow.presentation.telegram.formatting import escape_text
-from sensflow.presentation.telegram.keyboards import navigation_keyboard, place_id_choice_keyboard
-from sensflow.presentation.telegram.rendering import Screen, render_action_result, show_screen
+from sensflow.presentation.telegram.keyboards import navigation_keyboard
+from sensflow.presentation.telegram.rendering import (
+    Screen,
+    render_action_result,
+    render_draft_created,
+    show_screen,
+)
 from sensflow.presentation.telegram.states import CreateOrderStates
 
 router = Router(name="create_order")
@@ -63,7 +67,6 @@ async def receive_username(message: Message, state: FSMContext) -> None:
 async def receive_requested_robux(
     message: Message,
     state: FSMContext,
-    orders: OrderUseCases,
 ) -> None:
     data = await state.get_data()
     try:
@@ -72,75 +75,25 @@ async def receive_requested_robux(
             PrepareCreateOrderCommand,
             {"username": data.get("username"), "requested_robux": requested_robux},
         )
-        selection = await orders.prepare_create_order(command)
     except ApplicationError as error:
         await show_error(message, error)
         return
     await state.update_data(
-        requested_robux=requested_robux,
-        discovered_place_id=selection.discovered_place_id,
+        username=command.username,
+        requested_robux=command.requested_robux,
     )
-    if selection.discovered_place_id is None:
-        await state.set_state(CreateOrderStates.manual_place_id)
-        await show_screen(
-            message,
-            Screen(
-                text="No Place ID was discovered. Send the Place ID manually.",
-                reply_markup=navigation_keyboard(),
-            ),
-        )
-        return
-    await state.set_state(CreateOrderStates.place_id_confirmation)
+    await state.set_state(CreateOrderStates.manual_place_id)
     await show_screen(
         message,
         Screen(
-            text=f"Discovered Place ID: <code>{selection.discovered_place_id}</code>",
-            reply_markup=place_id_choice_keyboard(),
+            text=(
+                "Send the Roblox Place ID.\n\n"
+                "You can copy it from the game URL:\n"
+                "https://www.roblox.com/games/PLACE_ID/..."
+            ),
+            reply_markup=navigation_keyboard(),
         ),
     )
-
-
-@router.callback_query(
-    CreateOrderStates.place_id_confirmation,
-    OrderCallback.filter(F.action == OrderCallbackAction.ENTER_PLACE_ID),
-)
-async def request_manual_place_id(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    await state.set_state(CreateOrderStates.manual_place_id)
-    await show_screen(
-        callback,
-        Screen(text="Send the Place ID manually.", reply_markup=navigation_keyboard()),
-    )
-
-
-@router.callback_query(
-    CreateOrderStates.place_id_confirmation,
-    OrderCallback.filter(F.action == OrderCallbackAction.CONFIRM_PLACE_ID),
-)
-async def confirm_discovered_place_id(
-    callback: CallbackQuery,
-    state: FSMContext,
-    orders: OrderUseCases,
-) -> None:
-    await callback.answer()
-    data = await state.get_data()
-    try:
-        command = validate_input(
-            CreateOrderCommand,
-            {
-                "username": data.get("username"),
-                "requested_robux": data.get("requested_robux"),
-                "place_id": data.get("discovered_place_id"),
-                "operator_id": callback.from_user.id,
-            },
-        )
-        await state.clear()
-        result = await orders.create_order(command)
-    except ApplicationError as error:
-        await state.clear()
-        await show_error(callback, error)
-        return
-    await show_screen(callback, render_action_result(result))
 
 
 @router.message(CreateOrderStates.manual_place_id)
@@ -161,10 +114,28 @@ async def receive_manual_place_id(
                 "operator_id": message.from_user.id if message.from_user else None,
             },
         )
-        await state.clear()
+    except InputValidationError:
+        await show_screen(
+            message,
+            Screen(
+                text="Invalid Place ID. Send a positive numeric Roblox Place ID.",
+                reply_markup=navigation_keyboard(),
+            ),
+        )
+        return
+
+    try:
         result = await orders.create_order(command)
+        order = (
+            None
+            if result.order_id is None
+            else await orders.get_order(GetOrderQuery(order_id=result.order_id))
+        )
     except ApplicationError as error:
-        await state.clear()
         await show_error(message, error)
         return
-    await show_screen(message, render_action_result(result))
+    await state.clear()
+    await show_screen(
+        message,
+        render_action_result(result) if order is None else render_draft_created(order),
+    )

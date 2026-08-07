@@ -19,14 +19,9 @@ class RobloxIdentity:
     username: str
 
     def __post_init__(self) -> None:
-        normalized = self.username.strip()
         if self.user_id <= 0:
             raise DomainValidationError("Roblox User ID must be greater than zero")
-        if not normalized:
-            raise DomainValidationError("Roblox username must not be empty")
-        if len(normalized) > 64:
-            raise DomainValidationError("Roblox username must not exceed 64 characters")
-        object.__setattr__(self, "username", normalized)
+        object.__setattr__(self, "username", _validated_username(self.username))
 
 
 def create_customer(identity: RobloxIdentity, place_id: int, now: datetime) -> Customer:
@@ -41,13 +36,27 @@ def create_customer(identity: RobloxIdentity, place_id: int, now: datetime) -> C
     )
 
 
+def create_manual_customer(username: str, place_id: int, now: datetime) -> Customer:
+    """Create an unverified Customer without inventing a Roblox User ID."""
+    _validate_place_id(place_id)
+    return Customer(
+        roblox_user_id=None,
+        current_username=_validated_username(username),
+        current_place_id=place_id,
+        archived=False,
+        last_activity=now,
+    )
+
+
 def refresh_identity(
     customer: Customer,
     identity: RobloxIdentity,
     now: datetime,
 ) -> CustomerUsernameHistory | None:
     """Apply a verified username change while preserving the permanent identity."""
-    if identity.user_id != customer.roblox_user_id:
+    if customer.roblox_user_id is None:
+        customer.roblox_user_id = identity.user_id
+    elif identity.user_id != customer.roblox_user_id:
         raise DomainConflictError("Verified Roblox identity does not match the Customer")
     customer.last_activity = now
     if identity.username == customer.current_username:
@@ -89,3 +98,12 @@ def archive_customer(customer: Customer, archived: bool, now: datetime) -> bool:
 def _validate_place_id(place_id: int) -> None:
     if place_id <= 0:
         raise DomainValidationError("Place ID must be greater than zero")
+
+
+def _validated_username(username: str) -> str:
+    normalized = username.strip()
+    if not normalized:
+        raise DomainValidationError("Roblox username must not be empty")
+    if len(normalized) > 64:
+        raise DomainValidationError("Roblox username must not exceed 64 characters")
+    return normalized

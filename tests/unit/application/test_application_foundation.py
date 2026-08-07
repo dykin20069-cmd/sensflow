@@ -72,6 +72,9 @@ def test_validation_converts_untrusted_input_without_business_decisions() -> Non
     assert validate_positive_integer("42", "value") == 42
 
     with pytest.raises(InputValidationError):
+        validate_positive_integer("42.0", "value")
+
+    with pytest.raises(InputValidationError):
         validate_positive_integer("0", "value")
 
 

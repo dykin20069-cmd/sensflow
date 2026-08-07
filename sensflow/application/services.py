@@ -65,13 +65,12 @@ from sensflow.application.queries import (
 from sensflow.application.rbxcreate_bridge import RbxcreateBridge
 from sensflow.application.recovery import RecoveryService
 from sensflow.domain.customer.service import (
-    RobloxIdentity,
-    create_customer,
-    refresh_identity,
-    update_place_id,
+    archive_customer as apply_customer_archive,
 )
 from sensflow.domain.customer.service import (
-    archive_customer as apply_customer_archive,
+    create_manual_customer,
+    refresh_identity,
+    update_place_id,
 )
 from sensflow.domain.enums import ClientOrderStatus, MarketplaceOrderStatus, TimelineEventType
 from sensflow.domain.errors import DomainConflictError, DomainValidationError
@@ -392,10 +391,9 @@ class OrderApplicationService:
 
     async def create_order(self, command: CreateOrderCommand) -> ActionResultDTO:
         _authorize(command.operator_id, self._operator_id)
-        identity = await self._roblox.resolve_username(command.username)
         for attempt_number in range(2):
             try:
-                order = await self._create_order_transaction(command, identity)
+                order = await self._create_order_transaction(command)
             except (DomainValidationError, DomainConflictError) as error:
                 _raise_domain_error(error)
             except IntegrityError as error:
@@ -406,24 +404,25 @@ class OrderApplicationService:
                 ) from error
             else:
                 break
-        return ActionResultDTO(message=f"Draft order {order.id} was created.")
+        return ActionResultDTO(
+            message=f"Draft order {order.id} was created.",
+            order_id=order.id,
+        )
 
     async def _create_order_transaction(
         self,
         command: CreateOrderCommand,
-        identity: RobloxIdentity,
     ) -> ClientOrder:
         async with self._sessions.begin() as session:
             customers = CustomerRepository(session)
-            customer = await customers.get_by_roblox_user_id_for_update(identity.user_id)
+            customer = await customers.get_by_username_for_update(command.username)
             now = self._clock()
             if customer is None:
-                customer = await customers.save(create_customer(identity, command.place_id, now))
+                customer = await customers.save(
+                    create_manual_customer(command.username, command.place_id, now)
+                )
             else:
-                username_history = refresh_identity(customer, identity, now)
                 place_history = update_place_id(customer, command.place_id, now)
-                if username_history is not None:
-                    await CustomerUsernameHistoryRepository(session).save(username_history)
                 if place_history is not None:
                     await CustomerPlaceIDHistoryRepository(session).save(place_history)
                 await customers.save(customer)
@@ -767,8 +766,11 @@ class CustomerApplicationService:
                 customer = await customers.get_for_update(command.customer_id)
                 if customer is None:
                     raise NotFoundError("Customer")
-                identity = await self._roblox.refresh_identity(customer.roblox_user_id)
-                discovered_place_id = await self._roblox.discover_place_id(customer.roblox_user_id)
+                if customer.roblox_user_id is None:
+                    identity = await self._roblox.resolve_username(customer.current_username)
+                else:
+                    identity = await self._roblox.refresh_identity(customer.roblox_user_id)
+                discovered_place_id = await self._roblox.discover_place_id(identity.user_id)
                 now = self._clock()
                 username_history = refresh_identity(customer, identity, now)
                 place_history = (

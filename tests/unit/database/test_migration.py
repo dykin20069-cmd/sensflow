@@ -13,13 +13,16 @@ def alembic_config(output: StringIO | None = None) -> Config:
     return config
 
 
-def test_initial_migration_is_the_only_revision() -> None:
+def test_migration_chain_has_nullable_customer_identity_revision() -> None:
     scripts = ScriptDirectory.from_config(alembic_config())
     revisions = list(scripts.walk_revisions())
 
-    assert len(revisions) == 1
-    assert revisions[0].revision == "20260806_0001"
-    assert revisions[0].down_revision is None
+    assert [item.revision for item in revisions] == [
+        "20260807_0002",
+        "20260806_0001",
+    ]
+    assert revisions[0].down_revision == "20260806_0001"
+    assert revisions[1].down_revision is None
 
 
 def test_initial_migration_renders_complete_upgrade_sql() -> None:
@@ -42,6 +45,9 @@ def test_initial_migration_renders_complete_upgrade_sql() -> None:
     ):
         assert f"CREATE TABLE {table_name}" in sql
     assert "CREATE UNIQUE INDEX uq_marketplace_orders_one_active_per_client_order" in sql
+    assert "CREATE UNIQUE INDEX uq_customers_roblox_user_id_not_null" in sql
+    assert "WHERE roblox_user_id IS NOT NULL" in sql
+    assert "ALTER TABLE customers ALTER COLUMN roblox_user_id DROP NOT NULL" in sql
     assert "CREATE UNIQUE INDEX uq_system_settings_singleton" in sql
     assert sql.count("CREATE FUNCTION reject_protected_row_change()") == 1
     for trigger_name in (
@@ -66,3 +72,17 @@ def test_initial_migration_renders_complete_downgrade_sql() -> None:
     assert "DROP TABLE customers" in sql
     assert "DROP TYPE client_order_status" in sql
     assert "DROP FUNCTION reject_protected_row_change()" in sql
+
+
+def test_nullable_customer_identity_migration_has_guarded_downgrade() -> None:
+    output = StringIO()
+
+    command.downgrade(
+        alembic_config(output),
+        "20260807_0002:20260806_0001",
+        sql=True,
+    )
+
+    sql = output.getvalue()
+    assert "Cannot downgrade while Customers with NULL roblox_user_id exist" in sql
+    assert "ALTER TABLE customers ALTER COLUMN roblox_user_id SET NOT NULL" in sql

@@ -18,7 +18,9 @@ class CustomerRepository(Repository[Customer]):
 
     model = Customer
 
-    async def get_by_roblox_user_id(self, roblox_user_id: int) -> Customer | None:
+    async def get_by_roblox_user_id(self, roblox_user_id: int | None) -> Customer | None:
+        if roblox_user_id is None:
+            return None
         statement = select(Customer).where(Customer.roblox_user_id == roblox_user_id)
         return await self.session.scalar(statement)
 
@@ -26,14 +28,29 @@ class CustomerRepository(Repository[Customer]):
         statement = select(Customer).where(Customer.id == customer_id).with_for_update()
         return await self.session.scalar(statement)
 
-    async def get_by_roblox_user_id_for_update(self, roblox_user_id: int) -> Customer | None:
+    async def get_by_roblox_user_id_for_update(
+        self,
+        roblox_user_id: int | None,
+    ) -> Customer | None:
+        if roblox_user_id is None:
+            return None
         statement = (
             select(Customer).where(Customer.roblox_user_id == roblox_user_id).with_for_update()
         )
         return await self.session.scalar(statement)
 
     async def get_by_username(self, username: str) -> Customer | None:
-        statement = select(Customer).where(Customer.current_username == username)
+        statement = select(Customer).where(
+            func.lower(Customer.current_username) == username.casefold()
+        )
+        return await self.session.scalar(statement)
+
+    async def get_by_username_for_update(self, username: str) -> Customer | None:
+        statement = (
+            select(Customer)
+            .where(func.lower(Customer.current_username) == username.casefold())
+            .with_for_update()
+        )
         return await self.session.scalar(statement)
 
     async def get_details(self, customer_id: UUID) -> Customer | None:

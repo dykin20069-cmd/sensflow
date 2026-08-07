@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 from sensflow.domain.enums import SettingField
 
 Username = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+POSTGRESQL_BIGINT_MAX = 2**63 - 1
 
 
 class Command(BaseModel):
@@ -33,7 +34,7 @@ class PrepareCreateOrderCommand(Command):
 class CreateOrderCommand(PrepareCreateOrderCommand):
     """Complete input for the Create Order use case."""
 
-    place_id: int = Field(gt=0)
+    place_id: int = Field(gt=0, le=POSTGRESQL_BIGINT_MAX)
     operator_id: int = Field(gt=0)
 
 
@@ -51,7 +52,7 @@ class EditDraftCommand(OrderActionCommand):
     """Editable Draft values; omitted fields keep their current values."""
 
     requested_robux: int | None = Field(default=None, gt=0)
-    place_id: int | None = Field(default=None, gt=0)
+    place_id: int | None = Field(default=None, gt=0, le=POSTGRESQL_BIGINT_MAX)
 
     @model_validator(mode="after")
     def require_change(self) -> "EditDraftCommand":
@@ -82,7 +83,7 @@ class CustomerActionCommand(OperatorCommand):
 class UpdatePlaceIDCommand(CustomerActionCommand):
     """Structurally valid manual Place ID input."""
 
-    place_id: int = Field(gt=0)
+    place_id: int = Field(gt=0, le=POSTGRESQL_BIGINT_MAX)
 
 
 class ArchiveCustomerCommand(CustomerActionCommand):

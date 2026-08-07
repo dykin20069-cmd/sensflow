@@ -178,6 +178,21 @@ def render_order_details(order: OrderDetailDTO) -> Screen:
     )
 
 
+def render_draft_created(order: OrderDetailDTO) -> Screen:
+    """Render a newly created Draft with its immediately available actions."""
+    return Screen(
+        text=(
+            "<b>Draft Created</b>\n\n"
+            f"Order: <code>{order.id}</code>\n"
+            f"Username: {escape_text(order.customer_username)}\n"
+            f"Requested: {format_robux(order.requested_robux)}\n"
+            f"Place ID: <code>{order.current_place_id}</code>\n"
+            f"Status: {humanize(order.status)}"
+        ),
+        reply_markup=order_details_keyboard(order.id, order.available_actions),
+    )
+
+
 def render_timeline(events: tuple[TimelineEventDTO, ...]) -> Screen:
     body = (
         "\n".join(
@@ -239,10 +254,15 @@ def render_customer_details(customer: CustomerDetailDTO) -> Screen:
     )
     notes = escape_text(customer.notes) if customer.notes else "—"
     archived = "Yes" if customer.archived else "No"
+    roblox_user_id = (
+        "Not verified"
+        if customer.roblox_user_id is None
+        else f"<code>{customer.roblox_user_id}</code>"
+    )
     text = (
         "<b>Customer Details</b>\n\n"
         f"Username: {escape_text(customer.username)}\n"
-        f"Roblox User ID: <code>{customer.roblox_user_id}</code>\n"
+        f"Roblox User ID: {roblox_user_id}\n"
         f"Current Place ID: <code>{customer.current_place_id}</code>\n"
         f"Archived: {archived}\n"
         f"Notes: {notes}\n\n"

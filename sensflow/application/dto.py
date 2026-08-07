@@ -55,6 +55,7 @@ class ActionResultDTO:
     """Safe operator-facing result of a future mutating use case."""
 
     message: str
+    order_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +138,7 @@ class CustomerSummaryDTO:
 
     id: UUID
     username: str
-    roblox_user_id: int
+    roblox_user_id: int | None
     current_place_id: int
     archived: bool
 

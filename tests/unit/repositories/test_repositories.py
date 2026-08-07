@@ -118,11 +118,17 @@ def test_customer_repositories_build_lookup_search_and_history_queries() -> None
         customer_id = uuid4()
 
         customer_repository = CustomerRepository(session)
+        assert await customer_repository.get_by_roblox_user_id(None) is None
         await customer_repository.get_by_roblox_user_id(42)
         assert "customers.roblox_user_id = 42" in sql(session.scalar.await_args.args[0])
 
         await customer_repository.get_by_username("Builderman")
-        assert "customers.current_username = 'Builderman'" in sql(session.scalar.await_args.args[0])
+        assert "lower(customers.current_username) = 'builderman'" in sql(
+            session.scalar.await_args.args[0]
+        )
+
+        await customer_repository.get_by_username_for_update("Builderman")
+        assert "FOR UPDATE" in sql(session.scalar.await_args.args[0])
 
         await customer_repository.search("build", archived=False, offset=10, limit=5)
         search_sql = sql(session.scalars.await_args.args[0])

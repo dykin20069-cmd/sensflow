@@ -39,12 +39,12 @@ EXPECTED_INDEXES = {
     "ix_notifications_delivery_status",
     "ix_system_logs_created_at",
     "ix_timeline_events_client_order_id_created_at",
+    "uq_customers_roblox_user_id_not_null",
     "uq_marketplace_orders_one_active_per_client_order",
     "uq_system_settings_singleton",
 }
 
 EXPECTED_UNIQUE_CONSTRAINTS = {
-    "uq_customers_roblox_user_id",
     "uq_marketplace_orders_rbxcreate_order_id",
     "uq_statistics_period_start",
 }
@@ -134,6 +134,25 @@ def test_single_active_marketplace_order_index_is_partial_and_unique() -> None:
 
     assert index.unique is True
     assert str(index.dialect_options["postgresql"]["where"]) == "marketplace_status = 'active'"
+
+
+def test_customer_roblox_user_id_is_nullable_positive_and_unique_when_present() -> None:
+    column = Customer.__table__.c.roblox_user_id
+    index = next(
+        item
+        for item in Customer.__table__.indexes
+        if item.name == "uq_customers_roblox_user_id_not_null"
+    )
+    check = next(
+        item
+        for item in Customer.__table__.constraints
+        if item.name == "ck_customers_roblox_user_id_positive"
+    )
+
+    assert column.nullable is True
+    assert index.unique is True
+    assert str(index.dialect_options["postgresql"]["where"]) == "roblox_user_id IS NOT NULL"
+    assert str(check.sqltext) == "roblox_user_id IS NULL OR roblox_user_id > 0"
 
 
 def test_core_check_constraints_are_present() -> None:

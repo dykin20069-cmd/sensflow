@@ -139,12 +139,12 @@ def test_payment_confirmation_routes_to_preorder_and_appends_timeline_atomically
     asyncio.run(exercise())
 
 
-def test_create_order_resolves_customer_and_persists_draft_with_timeline() -> None:
+def test_create_order_persists_manual_customer_and_draft_without_roblox_lookup() -> None:
     async def exercise() -> None:
         customer_id = uuid4()
         order_id = uuid4()
         customers = MagicMock()
-        customers.get_by_roblox_user_id_for_update = AsyncMock(return_value=None)
+        customers.get_by_username_for_update = AsyncMock(return_value=None)
 
         async def save_customer(customer: object) -> object:
             customer.id = customer_id
@@ -162,9 +162,7 @@ def test_create_order_resolves_customer_and_persists_draft_with_timeline() -> No
         settings.get_current = AsyncMock(return_value=settings_row())
         timeline = MagicMock()
         timeline.save = AsyncMock(side_effect=lambda value: value)
-        roblox = SimpleNamespace(
-            resolve_username=AsyncMock(return_value=RobloxIdentity(42, "Builderman"))
-        )
+        roblox = SimpleNamespace(resolve_username=AsyncMock())
         service = OrderApplicationService(
             TransactionFactory(),
             roblox=roblox,
@@ -192,12 +190,17 @@ def test_create_order_resolves_customer_and_persists_draft_with_timeline() -> No
             )
 
         created = orders.save.await_args.args[0]
+        created_customer = customers.save.await_args.args[0]
         event = timeline.save.await_args.args[0]
+        roblox.resolve_username.assert_not_awaited()
+        assert created_customer.roblox_user_id is None
+        assert created_customer.current_username == "Builderman"
         assert created.customer_id == customer_id
         assert created.current_status is ClientOrderStatus.DRAFT
         assert created.marketplace_rate_limit == Decimal("1.25")
         assert event.event_type is TimelineEventType.ORDER_CREATED
         assert str(order_id) in result.message
+        assert result.order_id == order_id
 
     asyncio.run(exercise())
 

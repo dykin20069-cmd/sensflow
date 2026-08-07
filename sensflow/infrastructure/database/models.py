@@ -70,14 +70,22 @@ class Customer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __tablename__ = "customers"
     __table_args__ = (
-        UniqueConstraint("roblox_user_id", name="uq_customers_roblox_user_id"),
-        CheckConstraint("roblox_user_id > 0", name="roblox_user_id_positive"),
+        CheckConstraint(
+            "roblox_user_id IS NULL OR roblox_user_id > 0",
+            name="roblox_user_id_positive",
+        ),
         CheckConstraint("length(btrim(current_username)) > 0", name="current_username_not_empty"),
         CheckConstraint("current_place_id > 0", name="current_place_id_positive"),
         Index("ix_customers_current_username", "current_username"),
+        Index(
+            "uq_customers_roblox_user_id_not_null",
+            "roblox_user_id",
+            unique=True,
+            postgresql_where=text("roblox_user_id IS NOT NULL"),
+        ),
     )
 
-    roblox_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    roblox_user_id: Mapped[int | None] = mapped_column(BigInteger)
     current_username: Mapped[str] = mapped_column(String(64), nullable=False)
     current_place_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
