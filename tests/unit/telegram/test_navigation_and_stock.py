@@ -71,6 +71,7 @@ def stock_snapshot() -> CurrentStockDTO:
             MarketplaceStockDTO(Decimal("4.3"), 25, 338, 9071),
             MarketplaceStockDTO(Decimal("4.5"), 1, 257, 367),
             MarketplaceStockDTO(Decimal("4.8"), 1, 100, 100),
+            MarketplaceStockDTO(Decimal("5.1"), 100, 50_000, 500_000),
         ),
         maximum_purchase_rate=Decimal("4.5"),
         preferred_rate=Decimal("4.3"),
@@ -81,15 +82,54 @@ def stock_snapshot() -> CurrentStockDTO:
 def test_stock_rendering_formats_rate_tiers_and_policy() -> None:
     screen = render_current_stock(stock_snapshot())
 
-    assert "🟢 4.2$ — preferred" in screen.text
-    assert "Accounts: 3\nAvailable: 1,325 R$\nMax instant: 427 R$" in screen.text
-    assert "🟢 4.3$ — preferred" in screen.text
-    assert "🟡 4.5$ — acceptable" in screen.text
-    assert "🔴 4.8$ — ignored" in screen.text
-    assert "Total available within limit: 10,763 R$" in screen.text
-    assert "Maximum instant order: 427 R$" in screen.text
-    assert "Current limit: ≤ 4.5$" in screen.text
+    assert "🟢 4.2$ — 1,325 R$ (427 instant)" in screen.text
+    assert "🟢 4.3$ — 9,071 R$ (338 instant)" in screen.text
+    assert "🟡 4.5$ — 367 R$ (257 instant)" in screen.text
+    assert "🟡 4.8$ — 100 R$ (100 instant)" in screen.text
+    assert "5.1$" not in screen.text
+    assert "Accounts:" not in screen.text
+    assert "Visible total: 10,863 R$" in screen.text
+    assert "Best instant: 427 R$" in screen.text
+    assert "Your limit: ≤ 4.5$" in screen.text
     assert "Updated: 14:54:12 UTC" in screen.text
+
+
+def test_stock_rendering_falls_back_to_five_cheapest_levels() -> None:
+    stock = CurrentStockDTO(
+        items=tuple(
+            MarketplaceStockDTO(
+                rate=Decimal(rate),
+                accounts_count=1,
+                max_instant_order=instant,
+                total_robux_amount=available,
+            )
+            for rate, instant, available in (
+                ("5.6", 10, 60),
+                ("5.1", 44_745, 149_112),
+                ("5.3", 13_436, 145_105),
+                ("5.2", 115_690, 282_570),
+                ("5.5", 20, 50),
+                ("5.4", 30, 40),
+            )
+        ),
+        maximum_purchase_rate=Decimal("4.5"),
+        preferred_rate=Decimal("4.3"),
+        updated_at=datetime(2026, 8, 7, 22, 19, 19, tzinfo=UTC),
+    )
+
+    screen = render_current_stock(stock)
+
+    assert "⚠️ No offers up to 5.0$" in screen.text
+    assert "🔴 5.1$ — 149,112 R$ (44,745 instant)" in screen.text
+    assert "🔴 5.2$ — 282,570 R$ (115,690 instant)" in screen.text
+    assert "🔴 5.3$ — 145,105 R$ (13,436 instant)" in screen.text
+    assert "🔴 5.4$ — 40 R$ (30 instant)" in screen.text
+    assert "🔴 5.5$ — 50 R$ (20 instant)" in screen.text
+    assert "5.6$" not in screen.text
+    assert "Market currently above your viewing threshold." in screen.text
+    assert "Visible total: 576,877 R$" in screen.text
+    assert "Best instant: 115,690 R$" in screen.text
+    assert "Updated: 22:19:19 UTC" in screen.text
 
 
 def test_active_and_preorder_screens_expose_direct_production_actions() -> None:

@@ -52,6 +52,7 @@ from sensflow.presentation.telegram.keyboards import (
 from sensflow.presentation.telegram.pagination import Pagination
 
 MAX_PREVIEW_ITEMS = 10
+STOCK_VIEW_THRESHOLD = Decimal("5.0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,35 +139,39 @@ def _compact_number(value: int) -> str:
 
 
 def render_current_stock(stock: CurrentStockDTO) -> Screen:
+    ordered_levels = sorted(stock.items, key=lambda item: item.rate)
+    visible_levels = [item for item in ordered_levels if item.rate <= STOCK_VIEW_THRESHOLD]
+    above_threshold = not visible_levels
+    displayed_levels = visible_levels if visible_levels else ordered_levels[:5]
+
     lines: list[str] = []
-    for item in sorted(stock.items, key=lambda value: value.rate):
+    if above_threshold:
+        lines.append(f"⚠️ No offers up to {STOCK_VIEW_THRESHOLD:.1f}$")
+    for item in displayed_levels:
         if item.rate <= stock.preferred_rate:
             marker = "🟢"
-            label = "preferred"
-        elif item.rate <= stock.maximum_purchase_rate:
+        elif item.rate <= STOCK_VIEW_THRESHOLD:
             marker = "🟡"
-            label = "acceptable"
         else:
             marker = "🔴"
-            label = "ignored"
         lines.append(
-            f"{marker} {format_decimal(item.rate, '$')} — {label}\n"
-            f"Accounts: {item.accounts_count:,}\n"
-            f"Available: {item.total_robux_amount:,} R$\n"
-            f"Max instant: {item.max_instant_order:,} R$"
+            f"{marker} {format_decimal(item.rate, '$')} — "
+            f"{item.total_robux_amount:,} R$ ({item.max_instant_order:,} instant)"
         )
+    if above_threshold and ordered_levels:
+        lines.append("Market currently above your viewing threshold.")
     body = "\n".join(lines) or "No stock is currently available."
-    allowed = tuple(item for item in stock.items if item.rate <= stock.maximum_purchase_rate)
-    total_available = sum(item.total_robux_amount for item in allowed)
-    maximum_instant = max((item.max_instant_order for item in allowed), default=0)
+    total_available = sum(item.total_robux_amount for item in displayed_levels)
+    maximum_instant = max((item.max_instant_order for item in displayed_levels), default=0)
     updated = stock.updated_at.astimezone(UTC).strftime("%H:%M:%S UTC")
     return Screen(
         text=(
             "<b>📊 Current RBXCrate Stock</b>\n\n"
             f"{body}\n\n"
-            f"Total available within limit: {total_available:,} R$\n"
-            f"Maximum instant order: {maximum_instant:,} R$\n"
-            f"Current limit: ≤ {format_decimal(stock.maximum_purchase_rate, '$')}\n"
+            "━━━━━━━━━━━━\n"
+            f"Visible total: {total_available:,} R$\n"
+            f"Best instant: {maximum_instant:,} R$\n"
+            f"Your limit: ≤ {format_decimal(stock.maximum_purchase_rate, '$')}\n"
             f"Preferred: ≤ {format_decimal(stock.preferred_rate, '$')}\n"
             f"Updated: {updated}"
         ),
