@@ -105,6 +105,7 @@ def test_bootstrap_constructs_the_rbxcrate_gateway(valid_environment: dict[str, 
         patch("sensflow.bootstrap.create_bot", return_value=bot),
         patch("sensflow.bootstrap.create_dispatcher", return_value=dispatcher),
         patch("sensflow.bootstrap.RbxcrateGateway", return_value=rbxcrate) as gateway_type,
+        patch("sensflow.bootstrap.RobloxPlaceResolver", return_value=MagicMock()) as roblox_type,
     ):
         application = create_application(settings)
 
@@ -112,7 +113,8 @@ def test_bootstrap_constructs_the_rbxcrate_gateway(valid_environment: dict[str, 
         api_key=settings.rbxcrate.api_key,
         base_url=settings.rbxcrate.base_url,
     )
-    assert application.external_resources == (rbxcrate,)
+    roblox = roblox_type.return_value
+    assert application.external_resources == (rbxcrate, roblox)
 
 
 @pytest.mark.unit
@@ -139,9 +141,11 @@ def test_bootstrap_uses_isolated_rbxcrate_dry_run_gateway(
             return_value=dry_run_gateway,
         ) as dry_run_type,
         patch("sensflow.bootstrap.RbxcrateGateway") as live_gateway_type,
+        patch("sensflow.bootstrap.RobloxPlaceResolver", return_value=MagicMock()) as roblox_type,
     ):
         application = create_application(settings)
 
     dry_run_type.assert_called_once_with()
     live_gateway_type.assert_not_called()
-    assert application.external_resources == (dry_run_gateway,)
+    roblox = roblox_type.return_value
+    assert application.external_resources == (dry_run_gateway, roblox)

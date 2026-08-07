@@ -60,3 +60,40 @@ def test_pending_notification_is_delivered_and_marked_once() -> None:
         assert notification.delivered_at is not None
 
     asyncio.run(scenario())
+
+
+def test_stock_notification_cooldown_prevents_duplicate_queue_rows() -> None:
+    async def scenario() -> None:
+        stored: list[Notification] = []
+
+        class Repository:
+            async def exists_since(self, **kwargs: object) -> bool:
+                return bool(stored)
+
+            async def save(self, item: Notification) -> Notification:
+                stored.append(item)
+                return item
+
+        service = NotificationService(Sessions(), AsyncMock())  # type: ignore[arg-type]
+        with patch(
+            "sensflow.application.notifications.NotificationRepository",
+            return_value=Repository(),
+        ):
+            first = await service.queue_once(
+                notification_type=NotificationType.AUTOMATIC_REORDER,
+                title="New stock appeared · 4.3",
+                message="stock",
+                throttle_seconds=300,
+            )
+            second = await service.queue_once(
+                notification_type=NotificationType.AUTOMATIC_REORDER,
+                title="New stock appeared · 4.3",
+                message="stock",
+                throttle_seconds=300,
+            )
+
+        assert first is True
+        assert second is False
+        assert len(stored) == 1
+
+    asyncio.run(scenario())

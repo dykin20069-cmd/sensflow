@@ -20,6 +20,15 @@ _STRUCTURED_FIELDS = (
     "selected_rate",
     "synchronization_status",
     "recovery_action",
+    "rate",
+    "total_robux",
+    "max_instant",
+    "recipient",
+    "previous_marketplace_order_id",
+    "new_marketplace_order_id",
+    "username",
+    "place_id",
+    "count",
 )
 
 

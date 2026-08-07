@@ -15,7 +15,7 @@ class SettingsDefaults:
 
     maximum_purchase_rate: Decimal
     automatic_reorder_enabled: bool
-    automatic_reorder_interval_seconds: int
+    automatic_reorder_interval_seconds: Decimal
     marketplace_monitoring_interval_seconds: int
     synchronization_interval_seconds: int
     marketplace_commission: Decimal
@@ -56,8 +56,9 @@ def validate_settings(settings: SystemSettings) -> None:
     _positive_decimal(settings.maximum_purchase_rate, "Maximum purchase rate")
     _nonnegative_decimal(settings.marketplace_commission, "Marketplace commission")
     _positive_decimal(settings.usd_exchange_rate, "USD exchange rate")
+    if settings.automatic_reorder_interval_seconds < Decimal("0.3"):
+        raise DomainValidationError("Automatic reorder interval must be at least 0.3 seconds")
     for value, name in (
-        (settings.automatic_reorder_interval_seconds, "Automatic reorder interval"),
         (settings.marketplace_monitoring_interval_seconds, "Marketplace monitoring interval"),
         (settings.synchronization_interval_seconds, "Synchronization interval"),
     ):
@@ -69,6 +70,7 @@ def validate_settings(settings: SystemSettings) -> None:
 def _parse_setting(field: SettingField, raw_value: str) -> object:
     value = raw_value.strip()
     if field in {
+        SettingField.AUTOMATIC_REORDER_INTERVAL_SECONDS,
         SettingField.MAXIMUM_PURCHASE_RATE,
         SettingField.MARKETPLACE_COMMISSION,
         SettingField.USD_EXCHANGE_RATE,
@@ -78,7 +80,6 @@ def _parse_setting(field: SettingField, raw_value: str) -> object:
         except InvalidOperation as error:
             raise DomainValidationError(f"{field.value} must be a decimal number") from error
     if field in {
-        SettingField.AUTOMATIC_REORDER_INTERVAL_SECONDS,
         SettingField.MARKETPLACE_MONITORING_INTERVAL_SECONDS,
         SettingField.SYNCHRONIZATION_INTERVAL_SECONDS,
     }:

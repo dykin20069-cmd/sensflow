@@ -26,6 +26,7 @@ from sensflow.infrastructure.database.models import (
     SystemLog,
     SystemSettings,
     TimelineEvent,
+    UserPlaceCache,
 )
 from sensflow.repositories import (
     ClientOrderRepository,
@@ -38,6 +39,7 @@ from sensflow.repositories import (
     SystemLogRepository,
     SystemSettingsRepository,
     TimelineEventRepository,
+    UserPlaceCacheRepository,
 )
 
 
@@ -76,6 +78,7 @@ def test_every_database_table_has_one_concrete_repository() -> None:
             StatisticsRepository,
             SystemSettingsRepository,
             SystemLogRepository,
+            UserPlaceCacheRepository,
         )
     }
 
@@ -90,6 +93,7 @@ def test_every_database_table_has_one_concrete_repository() -> None:
         Statistics,
         SystemSettings,
         SystemLog,
+        UserPlaceCache,
     }
 
 
@@ -143,6 +147,12 @@ def test_customer_repositories_build_lookup_search_and_history_queries() -> None
         place_history = CustomerPlaceIDHistoryRepository(session)
         await place_history.list_for_customer(customer_id)
         assert "customer_place_id_history.customer_id" in sql(session.scalars.await_args.args[0])
+
+        place_cache = UserPlaceCacheRepository(session)
+        await place_cache.get_by_username_for_update("Builderman")
+        cache_sql = sql(session.scalar.await_args.args[0])
+        assert "lower(user_place_cache.roblox_username) = 'builderman'" in cache_sql
+        assert "FOR UPDATE" in cache_sql
 
     asyncio.run(exercise())
 

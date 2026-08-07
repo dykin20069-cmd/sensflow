@@ -14,6 +14,7 @@ from sensflow.application.commands import (
     CustomerActionCommand,
     FinalizePurchaseCommand,
     OrderActionCommand,
+    PrepareCreateOrderCommand,
     UpdateSettingCommand,
 )
 from sensflow.application.errors import AuthorizationError, ConflictError
@@ -59,6 +60,9 @@ class TransactionFactory:
         self.session = MagicMock()
 
     def begin(self) -> TransactionContext:
+        return TransactionContext(self.session)
+
+    def __call__(self) -> TransactionContext:
         return TransactionContext(self.session)
 
 
@@ -163,6 +167,9 @@ def test_create_order_persists_manual_customer_and_draft_without_roblox_lookup()
         settings.get_current = AsyncMock(return_value=settings_row())
         timeline = MagicMock()
         timeline.save = AsyncMock(side_effect=lambda value: value)
+        place_cache = MagicMock()
+        place_cache.get_by_username_for_update = AsyncMock(return_value=None)
+        place_cache.save = AsyncMock(side_effect=lambda value: value)
         roblox = SimpleNamespace(resolve_username=AsyncMock())
         service = OrderApplicationService(
             TransactionFactory(),
@@ -180,6 +187,10 @@ def test_create_order_persists_manual_customer_and_draft_without_roblox_lookup()
                 return_value=settings,
             ),
             patch("sensflow.application.services.TimelineEventRepository", return_value=timeline),
+            patch(
+                "sensflow.application.services.UserPlaceCacheRepository",
+                return_value=place_cache,
+            ),
         ):
             result = await service.create_order(
                 CreateOrderCommand(
@@ -202,6 +213,34 @@ def test_create_order_persists_manual_customer_and_draft_without_roblox_lookup()
         assert event.event_type is TimelineEventType.ORDER_CREATED
         assert str(order_id) in result.message
         assert result.order_id == order_id
+        remembered = place_cache.save.await_args.args[0]
+        assert remembered.roblox_username == "Builderman"
+        assert remembered.place_id == 200
+
+    asyncio.run(exercise())
+
+
+def test_prepare_create_order_uses_remembered_place_without_roblox_request() -> None:
+    async def exercise() -> None:
+        place_cache = MagicMock()
+        place_cache.get_by_username = AsyncMock(
+            return_value=SimpleNamespace(place_id=200, place_name="My Tycoon")
+        )
+        roblox = SimpleNamespace(resolve_public_places=AsyncMock())
+        service = OrderApplicationService(TransactionFactory(), roblox=roblox)
+
+        with patch(
+            "sensflow.application.services.UserPlaceCacheRepository",
+            return_value=place_cache,
+        ):
+            selection = await service.prepare_create_order(
+                PrepareCreateOrderCommand(username="Builderman", requested_robux=100)
+            )
+
+        assert selection.remembered_place is not None
+        assert selection.remembered_place.place_id == 200
+        assert selection.remembered_place.place_name == "My Tycoon"
+        roblox.resolve_public_places.assert_not_awaited()
 
     asyncio.run(exercise())
 

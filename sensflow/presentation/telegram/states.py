@@ -6,6 +6,7 @@ from aiogram.fsm.state import State, StatesGroup
 class CreateOrderStates(StatesGroup):
     username = State()
     requested_robux = State()
+    place_selection = State()
     manual_place_id = State()
     duplicate_confirmation = State()
 

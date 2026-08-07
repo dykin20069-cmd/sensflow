@@ -23,6 +23,7 @@ from sensflow.presentation.telegram.rendering import (
     render_current_stock,
     render_main_menu,
     render_system_status,
+    show_fresh_dashboard,
     show_screen,
 )
 
@@ -39,7 +40,7 @@ async def show_main_menu(message: Message, state: FSMContext) -> None:
 async def show_dashboard(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.clear()
-    await show_screen(callback, render_main_menu())
+    await show_fresh_dashboard(callback)
 
 
 @router.callback_query(NavigationCallback.filter(F.action == NavigationAction.NOOP))
@@ -51,7 +52,7 @@ async def ignore_noop(callback: CallbackQuery) -> None:
 async def navigate_home(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.clear()
-    await show_screen(callback, render_main_menu())
+    await show_fresh_dashboard(callback)
 
 
 @router.callback_query(
@@ -69,8 +70,7 @@ async def navigate_back_to_dashboard(callback: CallbackQuery, state: FSMContext)
 async def close_screen(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.clear()
-    if callback.message is not None:
-        await callback.message.delete()
+    await show_fresh_dashboard(callback)
 
 
 @router.callback_query(MenuCallback.filter(F.section == MainSection.CURRENT_STOCK))

@@ -35,6 +35,11 @@ class CreateOrderCommand(PrepareCreateOrderCommand):
     """Complete input for the Create Order use case."""
 
     place_id: int = Field(gt=0, le=POSTGRESQL_BIGINT_MAX)
+    place_name: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=255),
+    ] = "Manual Place"
+    roblox_user_id: int | None = Field(default=None, gt=0, le=POSTGRESQL_BIGINT_MAX)
     operator_id: int = Field(gt=0)
     allow_duplicate: bool = False
 

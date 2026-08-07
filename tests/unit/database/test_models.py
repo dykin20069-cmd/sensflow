@@ -24,6 +24,7 @@ EXPECTED_TABLES = {
     "system_logs",
     "system_settings",
     "timeline_events",
+    "user_place_cache",
 }
 
 EXPECTED_INDEXES = {
@@ -42,6 +43,7 @@ EXPECTED_INDEXES = {
     "uq_customers_roblox_user_id_not_null",
     "uq_marketplace_orders_one_active_per_client_order",
     "uq_system_settings_singleton",
+    "uq_user_place_cache_roblox_username_lower",
 }
 
 EXPECTED_UNIQUE_CONSTRAINTS = {
@@ -162,6 +164,7 @@ def test_core_check_constraints_are_present() -> None:
     assert "ck_client_orders_completed_order_fields" in check_constraints
     assert "ck_marketplace_orders_robux_amounts_consistent" in check_constraints
     assert "ck_notifications_delivery_timestamp_consistent" in check_constraints
+    assert "ck_system_settings_reorder_interval_minimum" in check_constraints
     assert "ck_system_settings_sync_interval_positive" in check_constraints
 
 

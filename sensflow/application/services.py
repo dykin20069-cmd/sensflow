@@ -1,8 +1,9 @@
 """Concrete application services coordinating repository-backed use cases."""
 
+import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import NoReturn
 
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -34,6 +35,8 @@ from sensflow.application.dto import (
     PageDTO,
     PlaceIDHistoryDTO,
     PlaceIDSelectionDTO,
+    PublicPlaceDTO,
+    RememberedPlaceDTO,
     SettingsDTO,
     StatisticsDTO,
     SystemStatusDTO,
@@ -67,12 +70,14 @@ from sensflow.application.queries import (
 from sensflow.application.rbxcreate_bridge import RbxcreateBridge
 from sensflow.application.recovery import RecoveryService
 from sensflow.domain.customer.service import (
-    archive_customer as apply_customer_archive,
-)
-from sensflow.domain.customer.service import (
+    RobloxIdentity,
+    create_customer,
     create_manual_customer,
     refresh_identity,
     update_place_id,
+)
+from sensflow.domain.customer.service import (
+    archive_customer as apply_customer_archive,
 )
 from sensflow.domain.enums import ClientOrderStatus, MarketplaceOrderStatus, TimelineEventType
 from sensflow.domain.errors import DomainConflictError, DomainValidationError
@@ -110,6 +115,7 @@ from sensflow.infrastructure.database.models import (
     Statistics,
     SystemSettings,
     TimelineEvent,
+    UserPlaceCache,
 )
 from sensflow.infrastructure.database.session import verify_database_connection
 from sensflow.repositories import (
@@ -121,10 +127,13 @@ from sensflow.repositories import (
     StatisticsRepository,
     SystemSettingsRepository,
     TimelineEventRepository,
+    UserPlaceCacheRepository,
 )
 
 SessionFactory = async_sessionmaker[AsyncSession]
 Clock = Callable[[], datetime]
+logger = logging.getLogger(__name__)
+MAX_PUBLIC_PLACE_OPTIONS = 10
 
 
 def _bounded_page(requested_page: int, page_size: int, total_items: int) -> int:
@@ -175,7 +184,21 @@ def _timeline_event(event: TimelineEvent) -> TimelineEventDTO:
     )
 
 
-def _order_detail(order: ClientOrder) -> OrderDetailDTO:
+def _order_detail(
+    order: ClientOrder,
+    *,
+    remembered_place: bool = False,
+    reorder_interval: Decimal | None = None,
+    now: datetime | None = None,
+) -> OrderDetailDTO:
+    preorder_started_at = next(
+        (
+            event.created_at
+            for event in reversed(order.timeline_events)
+            if event.event_type is TimelineEventType.PREORDER_CREATED
+        ),
+        order.created_at,
+    )
     current_attempt = next(
         (
             attempt
@@ -197,7 +220,15 @@ def _order_detail(order: ClientOrder) -> OrderDetailDTO:
         customer_username=order.customer.current_username,
         status=order.current_status,
         requested_robux=order.requested_robux,
-        customer_receives=order.customer_receives,
+        customer_receives=(
+            order.customer_receives
+            if order.customer_receives is not None
+            else calculate_customer_receives(
+                order.requested_robux,
+                tax_rate=Decimal("0.30"),
+                rounding=ROUND_DOWN,
+            )
+        ),
         current_place_id=order.current_place_id,
         marketplace_rate_limit=order.marketplace_rate_limit,
         marketplace_cost=order.marketplace_cost,
@@ -214,6 +245,15 @@ def _order_detail(order: ClientOrder) -> OrderDetailDTO:
         marketplace_order_reference=(
             None if current_attempt is None else current_attempt.rbxcreate_order_id
         ),
+        waiting_seconds=(
+            None
+            if order.current_status is not ClientOrderStatus.PREORDER or now is None
+            else max(0, int((now - preorder_started_at).total_seconds()))
+        ),
+        next_automatic_retry_seconds=(
+            reorder_interval if order.current_status is ClientOrderStatus.PREORDER else None
+        ),
+        remembered_place=remembered_place,
         available_actions=_order_actions(order.current_status),
     )
 
@@ -380,7 +420,20 @@ class OrderApplicationService:
             order = await ClientOrderRepository(session).get_details(query.order_id)
             if order is None:
                 raise NotFoundError("Client Order")
-            return _order_detail(order)
+            remembered = await UserPlaceCacheRepository(session).get_by_username(
+                order.customer.current_username
+            )
+            settings = await SystemSettingsRepository(session).get_current()
+            return _order_detail(
+                order,
+                remembered_place=(
+                    remembered is not None and remembered.place_id == order.current_place_id
+                ),
+                reorder_interval=(
+                    None if settings is None else settings.automatic_reorder_interval_seconds
+                ),
+                now=self._clock(),
+            )
 
     async def find_similar_order(
         self,
@@ -406,20 +459,46 @@ class OrderApplicationService:
         self,
         command: PrepareCreateOrderCommand,
     ) -> PlaceIDSelectionDTO:
-        identity = await self._roblox.resolve_username(command.username)
         async with self._sessions() as session:
-            customer = await CustomerRepository(session).get_by_roblox_user_id(identity.user_id)
-        if customer is not None:
-            place_id = customer.current_place_id
-        else:
-            try:
-                place_id = await self._roblox.discover_place_id(identity.user_id)
-            except FeatureUnavailableError:
-                place_id = None
+            remembered = await UserPlaceCacheRepository(session).get_by_username(command.username)
+        if remembered is not None:
+            logger.info(
+                "place_resolver_cache_hit",
+                extra={"username": command.username, "place_id": remembered.place_id},
+            )
+            return PlaceIDSelectionDTO(
+                username=command.username,
+                requested_robux=command.requested_robux,
+                remembered_place=RememberedPlaceDTO(
+                    place_id=remembered.place_id,
+                    place_name=remembered.place_name,
+                ),
+            )
+        return await self.refresh_public_places(command)
+
+    async def refresh_public_places(
+        self,
+        command: PrepareCreateOrderCommand,
+    ) -> PlaceIDSelectionDTO:
+        resolution = await self._roblox.resolve_public_places(command.username)
+        logger.info(
+            "place_resolver_public_places_found",
+            extra={"username": resolution.identity.username, "count": len(resolution.places)},
+        )
         return PlaceIDSelectionDTO(
-            username=identity.username,
+            username=resolution.identity.username,
             requested_robux=command.requested_robux,
-            discovered_place_id=place_id,
+            roblox_user_id=resolution.identity.user_id,
+            public_places=tuple(
+                PublicPlaceDTO(
+                    place_id=place.place_id,
+                    universe_id=place.universe_id,
+                    place_name=place.place_name,
+                    visits=place.visits,
+                    updated_at=place.updated_at,
+                )
+                for place in resolution.places[:MAX_PUBLIC_PLACE_OPTIONS]
+            ),
         )
 
     async def create_order(self, command: CreateOrderCommand) -> ActionResultDTO:
@@ -448,13 +527,30 @@ class OrderApplicationService:
     ) -> ClientOrder:
         async with self._sessions.begin() as session:
             customers = CustomerRepository(session)
-            customer = await customers.get_by_username_for_update(command.username)
             now = self._clock()
+            identity = (
+                None
+                if command.roblox_user_id is None
+                else RobloxIdentity(command.roblox_user_id, command.username)
+            )
+            customer = (
+                None
+                if identity is None
+                else await customers.get_by_roblox_user_id_for_update(identity.user_id)
+            )
+            if customer is None:
+                customer = await customers.get_by_username_for_update(command.username)
             if customer is None:
                 customer = await customers.save(
                     create_manual_customer(command.username, command.place_id, now)
+                    if identity is None
+                    else create_customer(identity, command.place_id, now)
                 )
             else:
+                if identity is not None:
+                    username_history = refresh_identity(customer, identity, now)
+                    if username_history is not None:
+                        await CustomerUsernameHistoryRepository(session).save(username_history)
                 place_history = update_place_id(customer, command.place_id, now)
                 if place_history is not None:
                     await CustomerPlaceIDHistoryRepository(session).save(place_history)
@@ -489,6 +585,21 @@ class OrderApplicationService:
                     now,
                 )
             )
+            place_cache = UserPlaceCacheRepository(session)
+            remembered = await place_cache.get_by_username_for_update(command.username)
+            if remembered is None:
+                remembered = UserPlaceCache(
+                    roblox_username=command.username,
+                    place_id=command.place_id,
+                    place_name=command.place_name,
+                    last_used_at=now,
+                )
+            else:
+                remembered.roblox_username = command.username
+                remembered.place_id = command.place_id
+                remembered.place_name = command.place_name
+                remembered.last_used_at = now
+            await place_cache.save(remembered)
             return order
 
     async def edit_draft(self, command: EditDraftCommand) -> ActionResultDTO:

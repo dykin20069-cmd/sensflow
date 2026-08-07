@@ -5,7 +5,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from sensflow.application.commands import CreateOrderCommand, PrepareCreateOrderCommand
-from sensflow.application.errors import ApplicationError, InputValidationError
+from sensflow.application.dto import PlaceIDSelectionDTO
+from sensflow.application.errors import (
+    ApplicationError,
+    FeatureUnavailableError,
+    InputValidationError,
+    RobloxIntegrationError,
+)
 from sensflow.application.ports import OrderUseCases
 from sensflow.application.queries import FindSimilarOrderQuery, GetOrderQuery
 from sensflow.application.validation import (
@@ -21,6 +27,8 @@ from sensflow.presentation.telegram.callbacks import (
     NavigationTarget,
     OrderCallback,
     OrderCallbackAction,
+    PlaceCallback,
+    PlaceCallbackAction,
 )
 from sensflow.presentation.telegram.errors import show_error
 from sensflow.presentation.telegram.formatting import escape_text
@@ -30,6 +38,9 @@ from sensflow.presentation.telegram.rendering import (
     render_draft_created,
     render_main_menu,
     render_order_card,
+    render_place_lookup_fallback,
+    render_public_places,
+    render_remembered_place,
     render_similar_order,
     show_screen,
 )
@@ -93,6 +104,7 @@ async def receive_username(message: Message, state: FSMContext) -> None:
 async def receive_requested_robux(
     message: Message,
     state: FSMContext,
+    orders: OrderUseCases,
 ) -> None:
     data = await state.get_data()
     try:
@@ -108,11 +120,80 @@ async def receive_requested_robux(
         username=command.username,
         requested_robux=command.requested_robux,
     )
-    await state.set_state(CreateOrderStates.manual_place_id)
-    await show_screen(
-        message,
-        _place_id_prompt(),
+    await _load_place_selection(message, state, orders, command, refresh=False)
+
+
+async def _load_place_selection(
+    event: Message | CallbackQuery,
+    state: FSMContext,
+    orders: OrderUseCases,
+    command: PrepareCreateOrderCommand,
+    *,
+    refresh: bool,
+) -> None:
+    try:
+        selection = (
+            await orders.refresh_public_places(command)
+            if refresh
+            else await orders.prepare_create_order(command)
+        )
+    except (FeatureUnavailableError, RobloxIntegrationError):
+        await state.set_state(CreateOrderStates.place_selection)
+        await show_screen(
+            event,
+            render_place_lookup_fallback(
+                "Public places could not be loaded. You can retry or enter a Place ID manually."
+            ),
+        )
+        return
+    except ApplicationError as error:
+        await show_error(event, error)
+        return
+    await _show_place_selection(event, state, selection)
+
+
+async def _show_place_selection(
+    event: Message | CallbackQuery,
+    state: FSMContext,
+    selection: PlaceIDSelectionDTO,
+) -> None:
+    await state.update_data(
+        username=selection.username,
+        requested_robux=selection.requested_robux,
+        roblox_user_id=selection.roblox_user_id,
+        remembered_place=(
+            None
+            if selection.remembered_place is None
+            else {
+                "place_id": selection.remembered_place.place_id,
+                "place_name": selection.remembered_place.place_name,
+            }
+        ),
+        public_places=[
+            {
+                "place_id": place.place_id,
+                "place_name": place.place_name,
+            }
+            for place in selection.public_places
+        ],
     )
+    if selection.remembered_place is not None:
+        await state.set_state(CreateOrderStates.place_selection)
+        await show_screen(event, render_remembered_place(selection))
+    elif selection.public_places:
+        await state.set_state(CreateOrderStates.place_selection)
+        await show_screen(event, render_public_places(selection))
+    else:
+        await state.set_state(CreateOrderStates.manual_place_id)
+        await show_screen(
+            event,
+            Screen(
+                text=(
+                    "<b>No public places found.</b>\n\nPlease enter the Roblox Place ID manually."
+                ),
+                reply_markup=navigation_keyboard(back_target=NavigationTarget.CREATE_ORDER),
+            ),
+        )
 
 
 @router.callback_query(
@@ -136,6 +217,10 @@ async def back_from_amount(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(
+    CreateOrderStates.place_selection,
+    NavigationCallback.filter(F.action == NavigationAction.BACK),
+)
+@router.callback_query(
     CreateOrderStates.manual_place_id,
     NavigationCallback.filter(F.action == NavigationAction.BACK),
 )
@@ -145,6 +230,98 @@ async def back_from_place_id(callback: CallbackQuery, state: FSMContext) -> None
     username = str(data.get("username", ""))
     await state.set_state(CreateOrderStates.requested_robux)
     await show_screen(callback, _amount_prompt(username))
+
+
+@router.callback_query(
+    CreateOrderStates.place_selection,
+    PlaceCallback.filter(F.action == PlaceCallbackAction.ENTER_MANUALLY),
+)
+async def enter_place_id_manually(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(CreateOrderStates.manual_place_id)
+    await show_screen(callback, _place_id_prompt())
+
+
+@router.callback_query(
+    CreateOrderStates.place_selection,
+    PlaceCallback.filter(
+        F.action.in_({PlaceCallbackAction.CHOOSE_PUBLIC, PlaceCallbackAction.REFRESH})
+    ),
+)
+async def refresh_public_places(
+    callback: CallbackQuery,
+    state: FSMContext,
+    orders: OrderUseCases,
+) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    try:
+        command = validate_input(
+            PrepareCreateOrderCommand,
+            {
+                "username": data.get("username"),
+                "requested_robux": data.get("requested_robux"),
+            },
+        )
+    except ApplicationError as error:
+        await show_error(callback, error)
+        return
+    await _load_place_selection(callback, state, orders, command, refresh=True)
+
+
+@router.callback_query(
+    CreateOrderStates.place_selection,
+    PlaceCallback.filter(F.action == PlaceCallbackAction.USE_REMEMBERED),
+)
+async def use_remembered_place(
+    callback: CallbackQuery,
+    state: FSMContext,
+    orders: OrderUseCases,
+) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    remembered = data.get("remembered_place")
+    if not isinstance(remembered, dict):
+        await show_error(callback, InputValidationError(("remembered_place: missing",)))
+        return
+    await _continue_with_place(
+        callback,
+        state,
+        orders,
+        place_id=remembered.get("place_id"),
+        place_name=remembered.get("place_name"),
+    )
+
+
+@router.callback_query(
+    CreateOrderStates.place_selection,
+    PlaceCallback.filter(F.action == PlaceCallbackAction.SELECT),
+)
+async def select_public_place(
+    callback: CallbackQuery,
+    callback_data: PlaceCallback,
+    state: FSMContext,
+    orders: OrderUseCases,
+) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    places = data.get("public_places")
+    if (
+        not isinstance(places, list)
+        or callback_data.index < 0
+        or callback_data.index >= len(places)
+        or not isinstance(places[callback_data.index], dict)
+    ):
+        await show_error(callback, InputValidationError(("place: invalid selection",)))
+        return
+    place = places[callback_data.index]
+    await _continue_with_place(
+        callback,
+        state,
+        orders,
+        place_id=place.get("place_id"),
+        place_name=place.get("place_name"),
+    )
 
 
 @router.callback_query(
@@ -187,18 +364,47 @@ async def receive_manual_place_id(
         )
         return
 
+    await _continue_with_place(
+        message,
+        state,
+        orders,
+        place_id=query.place_id,
+        place_name="Manual Place",
+    )
+
+
+async def _continue_with_place(
+    event: Message | CallbackQuery,
+    state: FSMContext,
+    orders: OrderUseCases,
+    *,
+    place_id: object,
+    place_name: object,
+) -> None:
+    data = await state.get_data()
     try:
+        query = validate_input(
+            FindSimilarOrderQuery,
+            {
+                "username": data.get("username"),
+                "requested_robux": data.get("requested_robux"),
+                "place_id": place_id,
+            },
+        )
         similar = await orders.find_similar_order(query)
     except ApplicationError as error:
-        await show_error(message, error)
+        await show_error(event, error)
         return
-    await state.update_data(place_id=place_id)
+    await state.update_data(
+        place_id=query.place_id,
+        place_name=place_name if isinstance(place_name, str) else "Manual Place",
+    )
     if similar is not None:
         await state.set_state(CreateOrderStates.duplicate_confirmation)
         await state.update_data(similar_order_id=str(similar.id))
-        await show_screen(message, render_similar_order(similar))
+        await show_screen(event, render_similar_order(similar))
         return
-    await _create_draft(message, state, orders, allow_duplicate=False)
+    await _create_draft(event, state, orders, allow_duplicate=False)
 
 
 async def _create_draft(
@@ -216,6 +422,8 @@ async def _create_draft(
                 "username": data.get("username"),
                 "requested_robux": data.get("requested_robux"),
                 "place_id": data.get("place_id"),
+                "place_name": data.get("place_name", "Manual Place"),
+                "roblox_user_id": data.get("roblox_user_id"),
                 "operator_id": event.from_user.id,
                 "allow_duplicate": allow_duplicate,
             },

@@ -1,7 +1,8 @@
 """Pure screen renderers and Telegram message presentation mechanics."""
 
+from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
@@ -13,6 +14,7 @@ from sensflow.application.dto import (
     OrderDetailDTO,
     OrderStatusCountsDTO,
     PageDTO,
+    PlaceIDSelectionDTO,
     SettingsDTO,
     StatisticsDTO,
     SystemStatusDTO,
@@ -37,6 +39,9 @@ from sensflow.presentation.telegram.keyboards import (
     order_details_keyboard,
     order_list_keyboard,
     orders_menu_keyboard,
+    place_lookup_fallback_keyboard,
+    public_places_keyboard,
+    remembered_place_keyboard,
     settings_keyboard,
     similar_order_keyboard,
     statistics_keyboard,
@@ -68,6 +73,18 @@ async def show_screen(event: Message | CallbackQuery, screen: Screen) -> None:
     await event.answer(screen.text, reply_markup=screen.reply_markup)
 
 
+async def show_fresh_dashboard(callback: CallbackQuery) -> None:
+    """Remove the current inline screen and send a clean Dashboard message."""
+    if isinstance(callback.message, Message):
+        dashboard = render_main_menu()
+        with suppress(TelegramBadRequest):
+            await callback.message.delete()
+        await callback.message.answer(
+            dashboard.text,
+            reply_markup=dashboard.reply_markup,
+        )
+
+
 def render_main_menu() -> Screen:
     return Screen(
         text="<b>🏠 SensFlow Dashboard</b>\n\nChoose an action:",
@@ -75,33 +92,71 @@ def render_main_menu() -> Screen:
     )
 
 
+def render_remembered_place(selection: PlaceIDSelectionDTO) -> Screen:
+    place = selection.remembered_place
+    if place is None:
+        return render_place_lookup_fallback("No remembered place is available.")
+    return Screen(
+        text=(
+            f"<b>Use remembered place for {escape_text(selection.username)}?</b>\n\n"
+            f"🎮 {escape_text(place.place_name)} "
+            f"(<code>{place.place_id}</code>)"
+        ),
+        reply_markup=remembered_place_keyboard(),
+    )
+
+
+def render_public_places(selection: PlaceIDSelectionDTO) -> Screen:
+    lines = [f"<b>Found public places for {escape_text(selection.username)}</b>"]
+    for place in selection.public_places:
+        lines.append(
+            f"\n🎮 {escape_text(place.place_name)}\n⭐ {_compact_number(place.visits)} visits"
+        )
+    return Screen(
+        text="\n".join(lines),
+        reply_markup=public_places_keyboard(selection.public_places),
+    )
+
+
+def render_place_lookup_fallback(message: str = "No public places found.") -> Screen:
+    return Screen(
+        text=(f"<b>{escape_text(message)}</b>\n\nPlease enter the Roblox Place ID manually."),
+        reply_markup=place_lookup_fallback_keyboard(),
+    )
+
+
+def _compact_number(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}".rstrip("0").rstrip(".") + "K"
+    return str(value)
+
+
 def render_current_stock(stock: CurrentStockDTO) -> Screen:
     lines: list[str] = []
     for item in sorted(stock.items, key=lambda value: value.rate):
         if item.rate <= stock.preferred_rate:
             marker = "🟢"
-            details = (
-                f"{item.accounts_count} "
-                f"{'account' if item.accounts_count == 1 else 'accounts'} — "
-                f"{item.total_robux_amount} R$"
-            )
+            details = f"{item.total_robux_amount:,} R$ available"
         elif item.rate <= stock.maximum_purchase_rate:
             marker = "🟡"
-            details = (
-                f"{item.accounts_count} "
-                f"{'account' if item.accounts_count == 1 else 'accounts'} — "
-                f"{item.total_robux_amount} R$"
-            )
+            details = f"{item.total_robux_amount:,} R$ available"
         else:
             marker = "🔴"
-            details = "ignored"
+            details = f"{item.total_robux_amount:,} R$ ignored"
         lines.append(f"{marker} {format_decimal(item.rate, '$')} — {details}")
     body = "\n".join(lines) or "No stock is currently available."
+    allowed = tuple(item for item in stock.items if item.rate <= stock.maximum_purchase_rate)
+    total_available = sum(item.total_robux_amount for item in allowed)
+    maximum_instant = max((item.max_instant_order for item in allowed), default=0)
     updated = stock.updated_at.astimezone(UTC).strftime("%H:%M:%S UTC")
     return Screen(
         text=(
             "<b>📊 Current RBXCrate Stock</b>\n\n"
             f"{body}\n\n"
+            f"Total available within limit: {total_available:,} R$\n"
+            f"Maximum instant order: {maximum_instant:,} R$\n"
             f"Current limit: ≤ {format_decimal(stock.maximum_purchase_rate, '$')}\n"
             f"Preferred: ≤ {format_decimal(stock.preferred_rate, '$')}\n"
             f"Updated: {updated}"
@@ -224,14 +279,37 @@ def render_order_details(order: OrderDetailDTO) -> Screen:
 def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Screen:
     if order.status is ClientOrderStatus.PURCHASING:
         title = "📦 Active Order"
-        marketplace = humanize(order.marketplace_status) if order.marketplace_status else "Active"
-        status_line = f"Marketplace status: {marketplace}"
+        body = (
+            f"👤 {escape_text(order.customer_username)}\n"
+            f"🛒 {format_robux(order.requested_robux)}\n"
+            f"🎁 Client: {format_robux(order.customer_receives)}\n"
+            "Status: Purchasing\n"
+            f"Marketplace rate limit: ≤ {format_decimal(order.marketplace_rate_limit, '$')}\n"
+            f"⏱ Created: {_format_card_datetime(order.created_at)}"
+        )
     elif order.status is ClientOrderStatus.PREORDER:
         title = "⏳ PreOrder"
-        status_line = f"Waiting for stock ≤ {format_decimal(order.marketplace_rate_limit, '$')}"
+        remembered = "Yes" if order.remembered_place else "No"
+        body = (
+            f"👤 {escape_text(order.customer_username)}\n"
+            f"🛒 {format_robux(order.requested_robux)}\n"
+            f"🎁 Client: {format_robux(order.customer_receives)}\n"
+            f"Waiting: {_format_duration(order.waiting_seconds)}\n"
+            "Next automatic retry: "
+            f"in {format_decimal(order.next_automatic_retry_seconds, 's')}\n"
+            f"Remembered place: {remembered}\n"
+            "Priority: Maximum clients (smallest amount first)\n"
+            f"Stock limit: ≤ {format_decimal(order.marketplace_rate_limit, '$')}"
+        )
     else:
         title = f"📋 {humanize(order.status)} Order"
-        status_line = f"Status: {humanize(order.status)}"
+        body = (
+            f"👤 {escape_text(order.customer_username)}\n"
+            f"💰 {format_robux(order.requested_robux)}\n"
+            f"🎮 <code>{order.current_place_id}</code>\n"
+            f"Status: {humanize(order.status)}\n"
+            f"Max rate: {format_decimal(order.marketplace_rate_limit, '$')}"
+        )
     reference = (
         ""
         if order.marketplace_order_reference is None
@@ -239,17 +317,25 @@ def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Scree
     )
     notice_text = "" if notice is None else f"\n\n{escape_text(notice)}"
     return Screen(
-        text=(
-            f"<b>{title}</b>\n\n"
-            f"👤 {escape_text(order.customer_username)}\n"
-            f"💰 {format_robux(order.requested_robux)}\n"
-            f"🎮 <code>{order.current_place_id}</code>\n"
-            f"{status_line}\n"
-            f"Max rate: {format_decimal(order.marketplace_rate_limit, '$')}"
-            f"{reference}{notice_text}"
-        ),
+        text=(f"<b>{title}</b>\n\n{body}{reference}{notice_text}"),
         reply_markup=order_details_keyboard(order.id, order.status, order.available_actions),
     )
+
+
+def _format_duration(seconds: int | None) -> str:
+    if seconds is None:
+        return "—"
+    minutes, remaining_seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {remaining_seconds}s"
+    return f"{remaining_seconds}s"
+
+
+def _format_card_datetime(value: datetime) -> str:
+    return value.astimezone(UTC).strftime("%d.%m.%Y %H:%M UTC")
 
 
 def render_similar_order(order: OrderDetailDTO) -> Screen:
@@ -374,7 +460,8 @@ def render_settings(settings: SettingsDTO | None) -> Screen:
             f"Marketplace commission: {format_decimal(settings.marketplace_commission)}\n"
             f"USD exchange rate: {format_decimal(settings.usd_exchange_rate)}\n"
             f"Automatic reorder: {format_boolean(settings.automatic_reorder_enabled)}\n"
-            f"Reorder interval: {settings.automatic_reorder_interval_seconds}s\n"
+            "Reorder interval: "
+            f"{format_decimal(settings.automatic_reorder_interval_seconds, 's')}\n"
             f"Monitoring interval: {settings.marketplace_monitoring_interval_seconds}s\n"
             f"Synchronization interval: {settings.synchronization_interval_seconds}s\n"
             f"Telegram notifications: {format_boolean(settings.telegram_notifications_enabled)}\n"

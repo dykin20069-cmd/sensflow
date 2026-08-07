@@ -55,11 +55,17 @@ class OrderCallbackAction(StrEnum):
     CANCEL = "cancel"
     REFRESH = "refresh"
     TIMELINE = "timeline"
-    CONFIRM_PLACE_ID = "place_ok"
-    ENTER_PLACE_ID = "place_manual"
     REUSE_SIMILAR = "reuse"
     CREATE_DUPLICATE = "duplicate"
     ABORT_CREATE = "abort_create"
+
+
+class PlaceCallbackAction(StrEnum):
+    SELECT = "select"
+    USE_REMEMBERED = "remembered"
+    CHOOSE_PUBLIC = "public"
+    ENTER_MANUALLY = "manual"
+    REFRESH = "refresh"
 
 
 class CustomerCallbackAction(StrEnum):
@@ -96,6 +102,11 @@ class OrderCallback(CallbackData, prefix="o"):
     action: OrderCallbackAction
     order_id: UUID | None = None
     status: ClientOrderStatus | None = None
+
+
+class PlaceCallback(CallbackData, prefix="pl"):
+    action: PlaceCallbackAction
+    index: int = -1
 
 
 class CustomerCallback(CallbackData, prefix="c"):

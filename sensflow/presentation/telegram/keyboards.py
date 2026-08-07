@@ -13,6 +13,7 @@ from sensflow.application.dto import (
     OrderAction,
     OrderStatusCountsDTO,
     OrderSummaryDTO,
+    PublicPlaceDTO,
 )
 from sensflow.domain.enums import ClientOrderStatus, StatisticsPeriod
 from sensflow.presentation.telegram.callbacks import (
@@ -27,6 +28,8 @@ from sensflow.presentation.telegram.callbacks import (
     OrderCallbackAction,
     PageCallback,
     PageScope,
+    PlaceCallback,
+    PlaceCallbackAction,
     SettingsCallback,
     SettingsCallbackAction,
     StatisticsCallback,
@@ -84,7 +87,10 @@ def navigation_keyboard(
     if include_close:
         builder.button(
             text="❌ Close",
-            callback_data=NavigationCallback(action=NavigationAction.CLOSE),
+            callback_data=NavigationCallback(
+                action=(NavigationAction.CLOSE if back_target is None else NavigationAction.BACK),
+                target=back_target or NavigationTarget.MAIN,
+            ),
         )
     builder.adjust(2, 1)
     return builder.as_markup()
@@ -266,24 +272,76 @@ def order_details_keyboard(
     )
     builder.button(
         text="❌ Close",
-        callback_data=NavigationCallback(action=NavigationAction.CLOSE),
+        callback_data=OrderCallback(action=OrderCallbackAction.LIST, status=status),
     )
     builder.adjust(1, 2, 1)
     return builder.as_markup()
 
 
-def place_id_choice_keyboard() -> InlineKeyboardMarkup:
+def remembered_place_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="Use discovered Place ID",
-        callback_data=OrderCallback(action=OrderCallbackAction.CONFIRM_PLACE_ID),
+        text="✅ Use remembered",
+        callback_data=PlaceCallback(action=PlaceCallbackAction.USE_REMEMBERED),
     )
     builder.button(
-        text="Enter manually",
-        callback_data=OrderCallback(action=OrderCallbackAction.ENTER_PLACE_ID),
+        text="🎮 Choose public place",
+        callback_data=PlaceCallback(action=PlaceCallbackAction.CHOOSE_PUBLIC),
     )
-    builder.attach(InlineKeyboardBuilder.from_markup(navigation_keyboard()))
+    builder.button(
+        text="⌨️ Enter manually",
+        callback_data=PlaceCallback(action=PlaceCallbackAction.ENTER_MANUALLY),
+    )
     builder.adjust(1)
+    builder.attach(
+        InlineKeyboardBuilder.from_markup(
+            navigation_keyboard(back_target=NavigationTarget.CREATE_ORDER)
+        )
+    )
+    return builder.as_markup()
+
+
+def public_places_keyboard(places: Iterable[PublicPlaceDTO]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for index, place in enumerate(places):
+        label = place.place_name if len(place.place_name) <= 38 else f"{place.place_name[:35]}…"
+        builder.button(
+            text=f"✅ Select · {label}",
+            callback_data=PlaceCallback(action=PlaceCallbackAction.SELECT, index=index),
+        )
+    builder.button(
+        text="⌨️ Enter manually",
+        callback_data=PlaceCallback(action=PlaceCallbackAction.ENTER_MANUALLY),
+    )
+    builder.button(
+        text="🔄 Refresh places",
+        callback_data=PlaceCallback(action=PlaceCallbackAction.REFRESH),
+    )
+    builder.adjust(1)
+    builder.attach(
+        InlineKeyboardBuilder.from_markup(
+            navigation_keyboard(back_target=NavigationTarget.CREATE_ORDER)
+        )
+    )
+    return builder.as_markup()
+
+
+def place_lookup_fallback_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="⌨️ Enter manually",
+        callback_data=PlaceCallback(action=PlaceCallbackAction.ENTER_MANUALLY),
+    )
+    builder.button(
+        text="🔄 Refresh places",
+        callback_data=PlaceCallback(action=PlaceCallbackAction.REFRESH),
+    )
+    builder.adjust(1)
+    builder.attach(
+        InlineKeyboardBuilder.from_markup(
+            navigation_keyboard(back_target=NavigationTarget.CREATE_ORDER)
+        )
+    )
     return builder.as_markup()
 
 

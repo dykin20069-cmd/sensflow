@@ -1,6 +1,7 @@
 """External capability contracts needed by business orchestration."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
@@ -8,6 +9,25 @@ from uuid import UUID
 from sensflow.application.errors import FeatureUnavailableError
 from sensflow.domain.customer.service import RobloxIdentity
 from sensflow.domain.marketplace.service import MarketplaceOrderResult
+
+
+@dataclass(frozen=True, slots=True)
+class RobloxPublicPlace:
+    """Public Roblox experience data needed by the Create Order flow."""
+
+    place_id: int
+    universe_id: int
+    place_name: str
+    visits: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RobloxPlaceResolution:
+    """A verified Roblox identity and its public places."""
+
+    identity: RobloxIdentity
+    places: tuple[RobloxPublicPlace, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,13 +39,15 @@ class MarketplaceCancellationResult:
 
 
 class RobloxGateway(Protocol):
-    """Roblox identity capabilities implemented in the later API milestone."""
+    """Official Roblox identity and public-place capabilities."""
 
     async def resolve_username(self, username: str) -> RobloxIdentity: ...
 
     async def refresh_identity(self, roblox_user_id: int) -> RobloxIdentity: ...
 
     async def discover_place_id(self, roblox_user_id: int) -> int | None: ...
+
+    async def resolve_public_places(self, username: str) -> RobloxPlaceResolution: ...
 
 
 class MarketplaceGateway(Protocol):
@@ -62,6 +84,9 @@ class UnavailableRobloxGateway:
 
     async def discover_place_id(self, roblox_user_id: int) -> int | None:
         raise FeatureUnavailableError("Roblox Place ID discovery")
+
+    async def resolve_public_places(self, username: str) -> RobloxPlaceResolution:
+        raise FeatureUnavailableError("Roblox public Place lookup")
 
 
 class UnavailableMarketplaceGateway:

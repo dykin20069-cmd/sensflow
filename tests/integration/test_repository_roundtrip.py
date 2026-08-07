@@ -15,6 +15,7 @@ from sensflow.domain.order.timeline import create_timeline_event
 from sensflow.infrastructure.database.models import (
     CustomerPlaceIDHistory,
     CustomerUsernameHistory,
+    UserPlaceCache,
 )
 from sensflow.repositories import (
     ClientOrderRepository,
@@ -23,6 +24,7 @@ from sensflow.repositories import (
     CustomerUsernameHistoryRepository,
     MarketplaceOrderRepository,
     TimelineEventRepository,
+    UserPlaceCacheRepository,
 )
 
 pytestmark = pytest.mark.integration
@@ -77,6 +79,14 @@ def test_repository_graph_roundtrip(postgresql_url: str) -> None:
                         now + timedelta(microseconds=1),
                     )
                 )
+                remembered = await UserPlaceCacheRepository(session).save(
+                    UserPlaceCache(
+                        roblox_username=customer.current_username,
+                        place_id=customer.current_place_id,
+                        place_name="Repository Place",
+                        last_used_at=now,
+                    )
+                )
                 customer_id = customer.id
                 order_id = order.id
 
@@ -91,6 +101,9 @@ def test_repository_graph_roundtrip(postgresql_url: str) -> None:
                 )
                 attempts = await MarketplaceOrderRepository(session).list_for_client_order(order_id)
                 timeline = await TimelineEventRepository(session).list_for_client_order(order_id)
+                remembered_lookup = await UserPlaceCacheRepository(session).get_by_username(
+                    "repositorycustomer"
+                )
 
             assert customer_details is not None
             assert order_details is not None
@@ -98,6 +111,8 @@ def test_repository_graph_roundtrip(postgresql_url: str) -> None:
             assert places[0].id == place_history.id
             assert attempts[0].id == marketplace_order.id
             assert timeline[0].id == timeline_event.id
+            assert remembered_lookup is not None
+            assert remembered_lookup.id == remembered.id
             assert customer_details.client_orders[0].id == order_id
             assert order_details.marketplace_orders[0].rbxcreate_order_id == (
                 "repository-roundtrip"

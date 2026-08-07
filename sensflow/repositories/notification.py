@@ -1,10 +1,11 @@
 """Notification repository."""
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
 
-from sensflow.domain.enums import NotificationDeliveryStatus
+from sensflow.domain.enums import NotificationDeliveryStatus, NotificationType
 from sensflow.infrastructure.database.models import Notification
 from sensflow.repositories.base import Repository
 
@@ -51,3 +52,17 @@ class NotificationRepository(Repository[Notification]):
         )
         result = await self.session.scalars(statement)
         return list(result)
+
+    async def exists_since(
+        self,
+        *,
+        notification_type: NotificationType,
+        title: str,
+        since: datetime,
+    ) -> bool:
+        statement = select(Notification.id).where(
+            Notification.notification_type == notification_type,
+            Notification.title == title,
+            Notification.created_at >= since,
+        )
+        return await self.session.scalar(statement) is not None

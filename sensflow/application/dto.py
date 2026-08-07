@@ -60,12 +60,33 @@ class ActionResultDTO:
 
 
 @dataclass(frozen=True, slots=True)
+class RememberedPlaceDTO:
+    """The most recently selected place for a normalized Roblox username."""
+
+    place_id: int
+    place_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class PublicPlaceDTO:
+    """One official public Roblox place offered to the operator."""
+
+    place_id: int
+    universe_id: int
+    place_name: str
+    visits: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class PlaceIDSelectionDTO:
-    """Place ID discovered for a pending Create Order conversation, if any."""
+    """Remembered and official public places for a pending Create Order."""
 
     username: str
     requested_robux: int
-    discovered_place_id: int | None
+    roblox_user_id: int | None = None
+    remembered_place: RememberedPlaceDTO | None = None
+    public_places: tuple[PublicPlaceDTO, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +137,9 @@ class OrderDetailDTO:
     marketplace_rate: Decimal | None = None
     marketplace_status: MarketplaceOrderStatus | None = None
     marketplace_order_reference: str | None = None
+    waiting_seconds: int | None = None
+    next_automatic_retry_seconds: Decimal | None = None
+    remembered_place: bool = False
     available_actions: tuple[OrderAction, ...] = ()
 
 
@@ -202,7 +226,7 @@ class SettingsDTO:
 
     maximum_purchase_rate: Decimal
     automatic_reorder_enabled: bool
-    automatic_reorder_interval_seconds: int
+    automatic_reorder_interval_seconds: Decimal
     marketplace_monitoring_interval_seconds: int
     synchronization_interval_seconds: int
     marketplace_commission: Decimal

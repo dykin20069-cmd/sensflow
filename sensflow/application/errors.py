@@ -41,6 +41,10 @@ class MarketplaceIntegrationError(ApplicationError):
     """A safe application-level representation of an RBXCrate failure."""
 
 
+class RobloxIntegrationError(ApplicationError):
+    """A safe application-level representation of an official Roblox API failure."""
+
+
 class UnknownMarketplaceStatusError(MarketplaceIntegrationError):
     """RBXCrate returned a status that has no approved V1 mapping."""
 

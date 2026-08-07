@@ -12,6 +12,7 @@ from sensflow.repositories.settings import SystemSettingsRepository
 from sensflow.repositories.statistics import StatisticsRepository
 from sensflow.repositories.system_log import SystemLogRepository
 from sensflow.repositories.timeline import TimelineEventRepository
+from sensflow.repositories.user_place_cache import UserPlaceCacheRepository
 
 __all__ = [
     "ClientOrderRepository",
@@ -24,4 +25,5 @@ __all__ = [
     "SystemLogRepository",
     "SystemSettingsRepository",
     "TimelineEventRepository",
+    "UserPlaceCacheRepository",
 ]

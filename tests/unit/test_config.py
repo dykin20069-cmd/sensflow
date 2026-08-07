@@ -140,6 +140,11 @@ def test_purchase_rate_bounds_and_positive_intervals_fail_fast(
     with pytest.raises(ConfigurationError, match="synchronization_interval_seconds"):
         load_settings(valid_environment)
 
+    valid_environment["MARKETPLACE_SYNC_INTERVAL_SECONDS"] = "1"
+    valid_environment["AUTOMATIC_REORDER_INTERVAL_SECONDS"] = "0.2"
+    with pytest.raises(ConfigurationError, match="automatic_reorder_interval_seconds"):
+        load_settings(valid_environment)
+
 
 @pytest.mark.parametrize(
     ("environment_name", "location"),

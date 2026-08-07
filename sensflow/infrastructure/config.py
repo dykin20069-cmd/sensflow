@@ -126,7 +126,10 @@ class AutomationSettings(SettingsModel):
     """Automation defaults loaded at startup."""
 
     automatic_reorder_enabled: bool
-    automatic_reorder_interval_seconds: int = Field(gt=0)
+    automatic_reorder_interval_seconds: Decimal = Field(
+        default=Decimal("0.3"),
+        ge=Decimal("0.3"),
+    )
 
 
 class FinanceSettings(SettingsModel):
@@ -187,7 +190,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         "automation": {
             "automatic_reorder_enabled": source.get("AUTOMATIC_REORDER_ENABLED"),
             "automatic_reorder_interval_seconds": source.get("AUTOMATIC_REORDER_INTERVAL_SECONDS")
-            or source.get("REORDER_CHECK_INTERVAL_SECONDS"),
+            or source.get("REORDER_CHECK_INTERVAL_SECONDS", "0.3"),
         },
         "finance": {"usd_exchange_rate": source.get("USD_EXCHANGE_RATE")},
     }

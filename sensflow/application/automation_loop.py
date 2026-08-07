@@ -3,6 +3,8 @@
 import asyncio
 import logging
 from contextlib import suppress
+from decimal import Decimal
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -40,6 +42,7 @@ class AutomationLoop:
         self._notifications = notifications
         self._shutdown = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._visible_stock_rates: set[Decimal] = set()
 
     async def start(self) -> None:
         """Start the loop once without blocking application startup."""
@@ -90,39 +93,102 @@ class AutomationLoop:
         return len(active_attempts)
 
     async def run_reorder_pass(self) -> None:
-        """Attempt the maximum number of complete waiting orders from current stock."""
+        """Notify stock, maximize completed PreOrders, and safely requeue active attempts."""
         async with self._sessions() as session:
-            orders = await ClientOrderRepository(session).list_by_status(
+            repository = ClientOrderRepository(session)
+            orders = await repository.list_by_status(
                 ClientOrderStatus.PREORDER,
                 limit=10_000,
             )
-        if not orders:
-            return
+            active_orders = await repository.list_by_status(
+                ClientOrderStatus.PURCHASING,
+                limit=10_000,
+            )
         candidates = tuple((order.id, order.requested_robux) for order in orders)
-        order_ids, stock = await self._workflows.plan_preorders(candidates)
+        plan = await self._workflows.plan_automation(candidates)
         settings = await self._get_settings()
+        visible_rates = {
+            stock.rate for stock in plan.stock if stock.rate <= plan.maximum_purchase_rate
+        }
+        new_rates = visible_rates - self._visible_stock_rates
+        for stock in plan.stock:
+            if stock.rate in new_rates:
+                logger.info(
+                    "stock_detected",
+                    extra={
+                        "rate": str(stock.rate),
+                        "total_robux": stock.total_robux_amount,
+                        "max_instant": stock.max_instant_order,
+                    },
+                )
+        self._visible_stock_rates = visible_rates
         if (
-            order_ids
-            and stock is not None
-            and self._notifications is not None
+            self._notifications is not None
             and settings.telegram_notifications_enabled
             and NotificationType.AUTOMATIC_REORDER in settings.notification_categories
         ):
-            await self._notifications.queue(
-                notification_type=NotificationType.AUTOMATIC_REORDER,
-                title="Stock appeared",
-                message=_stock_appeared_message(stock, len(order_ids)),
-            )
-        for order_id in order_ids:
+            for stock in plan.stock:
+                if stock.rate not in new_rates:
+                    continue
+                await self._notifications.queue_once(
+                    notification_type=NotificationType.AUTOMATIC_REORDER,
+                    title=f"New stock appeared · {stock.rate.normalize()}",
+                    message=_stock_appeared_message(stock),
+                    throttle_seconds=300,
+                )
+        for order_id in plan.order_ids:
             try:
                 await self._workflows.start_purchase(order_id)
-            except Exception:
+            except Exception as error:
                 logger.exception(
                     "automatic_reorder_failed",
                     extra={"order_id": str(order_id)},
                 )
+                await self._queue_marketplace_error(
+                    order_id,
+                    "create_order",
+                    error,
+                    enabled=(
+                        settings.telegram_notifications_enabled
+                        and NotificationType.MARKETPLACE_ERROR in settings.notification_categories
+                    ),
+                )
+        for order in active_orders:
+            try:
+                await self._workflows.automatic_requeue(order.id, plan.stock)
+            except Exception as error:
+                logger.exception(
+                    "automatic_reorder_failed",
+                    extra={"order_id": str(order.id)},
+                )
+                await self._queue_marketplace_error(
+                    order.id,
+                    "automatic_reorder",
+                    error,
+                    enabled=(
+                        settings.telegram_notifications_enabled
+                        and NotificationType.MARKETPLACE_ERROR in settings.notification_categories
+                    ),
+                )
         if self._notifications is not None:
             await self._notifications.deliver_pending()
+
+    async def _queue_marketplace_error(
+        self,
+        order_id: object,
+        operation: str,
+        error: Exception,
+        *,
+        enabled: bool,
+    ) -> None:
+        if self._notifications is None or not enabled:
+            return
+        await self._notifications.queue(
+            notification_type=NotificationType.MARKETPLACE_ERROR,
+            title="Marketplace error",
+            message=_marketplace_error_message(order_id, operation, error),
+            client_order_id=order_id if isinstance(order_id, UUID) else None,
+        )
 
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -138,7 +204,7 @@ class AutomationLoop:
                 if now >= next_reorder:
                     if settings.automatic_reorder_enabled:
                         await self.run_reorder_pass()
-                    next_reorder = loop.time() + settings.automatic_reorder_interval_seconds
+                    next_reorder = loop.time() + float(settings.automatic_reorder_interval_seconds)
                 delay = max(0.0, min(next_sync, next_reorder) - loop.time())
             except Exception:
                 logger.exception("automation_iteration_failed")
@@ -157,12 +223,24 @@ class AutomationLoop:
             return await repository.save(create_settings(self._settings_defaults))
 
 
-def _stock_appeared_message(stock: MarketplaceStock, preorder_count: int) -> str:
-    suffix = "PreOrder" if preorder_count == 1 else "PreOrders"
+def _stock_appeared_message(stock: MarketplaceStock) -> str:
+    preferred = "\n🎯 Preferred stock detected (≤ 4.3$)" if stock.rate <= Decimal("4.3") else ""
     return (
-        "<b>🟢 Stock appeared</b>\n"
+        "<b>🟢 New stock appeared</b>\n\n"
         f"Rate: {stock.rate.normalize()}$\n"
-        f"Available: {stock.total_robux_amount} R$\n"
-        f"Largest instant order: {stock.max_instant_order} R$\n"
-        f"🔄 Requeueing {preorder_count} {suffix}…"
+        f"Available: {stock.total_robux_amount:,} R$\n"
+        f"Max instant: {stock.max_instant_order:,} R$"
+        f"{preferred}"
+    )
+
+
+def _marketplace_error_message(order_id: object, operation: str, error: Exception) -> str:
+    identifier = getattr(order_id, "hex", str(order_id))
+    short_id = str(identifier)[:8].upper()
+    return (
+        "<b>❌ Marketplace error</b>\n\n"
+        f"Order: #{short_id}\n\n"
+        f"Operation: {operation}\n\n"
+        f"Error: {type(error).__name__}: {error}\n\n"
+        "Retry scheduled automatically."
     )

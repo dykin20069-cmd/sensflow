@@ -5,11 +5,14 @@ from contextlib import AbstractAsyncContextManager
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import sensflow.application.automation_loop as loop_module
 from sensflow.application.automation_loop import AutomationLoop, _stock_appeared_message
+from sensflow.application.marketplace_workflows import AutomationStockPlan
 from sensflow.application.rbxcreate_bridge import MarketplaceStock
+from sensflow.domain.enums import ClientOrderStatus, NotificationType
 from sensflow.infrastructure.database.models import SystemSettings
 
 
@@ -107,11 +110,76 @@ def test_stock_notification_describes_selected_tier_and_client_count() -> None:
             max_instant_order=338,
             total_robux_amount=9071,
         ),
-        3,
     )
 
-    assert "Stock appeared" in message
+    assert "New stock appeared" in message
     assert "Rate: 4.3$" in message
-    assert "Available: 9071 R$" in message
-    assert "Largest instant order: 338 R$" in message
-    assert "Requeueing 3 PreOrders" in message
+    assert "Available: 9,071 R$" in message
+    assert "Max instant: 338 R$" in message
+    assert "Preferred stock detected" in message
+
+
+def test_reorder_pass_uses_one_stock_plan_for_preorders_and_active_orders(
+    monkeypatch: Any,
+) -> None:
+    async def scenario() -> None:
+        preorder_id = uuid4()
+        active_id = uuid4()
+        stock = MarketplaceStock(Decimal("4.3"), 25, 338, 9071)
+        settings = SystemSettings(
+            maximum_purchase_rate=Decimal("4.5"),
+            automatic_reorder_enabled=True,
+            automatic_reorder_interval_seconds=Decimal("0.3"),
+            marketplace_monitoring_interval_seconds=30,
+            synchronization_interval_seconds=30,
+            marketplace_commission=Decimal("0.05"),
+            usd_exchange_rate=Decimal("90"),
+            telegram_notifications_enabled=True,
+            notification_categories=[NotificationType.AUTOMATIC_REORDER],
+            application_timezone="UTC",
+        )
+
+        class ClientRepository:
+            async def list_by_status(self, status: object, **kwargs: object) -> list[object]:
+                if status is ClientOrderStatus.PREORDER:
+                    return [SimpleNamespace(id=preorder_id, requested_robux=100)]
+                return [SimpleNamespace(id=active_id, requested_robux=100)]
+
+        class SettingsRepository:
+            async def get_current(self) -> SystemSettings:
+                return settings
+
+        monkeypatch.setattr(
+            loop_module, "ClientOrderRepository", lambda session: ClientRepository()
+        )
+        monkeypatch.setattr(
+            loop_module, "SystemSettingsRepository", lambda session: SettingsRepository()
+        )
+        workflows = MagicMock()
+        workflows.plan_automation = AsyncMock(
+            return_value=AutomationStockPlan(
+                order_ids=(preorder_id,),
+                stock=(stock,),
+                maximum_purchase_rate=Decimal("4.5"),
+            )
+        )
+        workflows.start_purchase = AsyncMock()
+        workflows.automatic_requeue = AsyncMock()
+        notifications = MagicMock()
+        notifications.queue_once = AsyncMock(return_value=True)
+        notifications.deliver_pending = AsyncMock(return_value=1)
+
+        automation = AutomationLoop(
+            Sessions(),  # type: ignore[arg-type]
+            workflows,
+            notifications=notifications,
+        )
+        await automation.run_reorder_pass()
+
+        workflows.plan_automation.assert_awaited_once()
+        workflows.start_purchase.assert_awaited_once_with(preorder_id)
+        workflows.automatic_requeue.assert_awaited_once_with(active_id, (stock,))
+        notifications.queue_once.assert_awaited_once()
+        notifications.deliver_pending.assert_awaited_once()
+
+    asyncio.run(scenario())

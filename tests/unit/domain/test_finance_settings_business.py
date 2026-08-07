@@ -63,6 +63,7 @@ def test_settings_service_parses_every_value_shape_and_rejects_invalid_values() 
 
     update_setting(settings, SettingField.MAXIMUM_PURCHASE_RATE, "1.50")
     update_setting(settings, SettingField.AUTOMATIC_REORDER_ENABLED, "off")
+    update_setting(settings, SettingField.AUTOMATIC_REORDER_INTERVAL_SECONDS, "0.3")
     update_setting(settings, SettingField.SYNCHRONIZATION_INTERVAL_SECONDS, "45")
     update_setting(
         settings,
@@ -73,6 +74,7 @@ def test_settings_service_parses_every_value_shape_and_rejects_invalid_values() 
 
     assert settings.maximum_purchase_rate == Decimal("1.50")
     assert settings.automatic_reorder_enabled is False
+    assert settings.automatic_reorder_interval_seconds == Decimal("0.3")
     assert settings.synchronization_interval_seconds == 45
     assert settings.notification_categories == [
         NotificationType.PURCHASE_COMPLETED,
@@ -82,3 +84,5 @@ def test_settings_service_parses_every_value_shape_and_rejects_invalid_values() 
 
     with pytest.raises(DomainValidationError):
         update_setting(settings, SettingField.USD_EXCHANGE_RATE, "0")
+    with pytest.raises(DomainValidationError):
+        update_setting(settings, SettingField.AUTOMATIC_REORDER_INTERVAL_SECONDS, "0.2")

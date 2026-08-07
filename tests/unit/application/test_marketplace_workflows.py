@@ -50,9 +50,11 @@ class Bridge:
         self,
         stock: tuple[MarketplaceStock, ...] = (),
         sync: MarketplaceSyncResult | None = None,
+        sync_results: tuple[MarketplaceSyncResult, ...] = (),
     ) -> None:
         self.stock = stock
         self.sync = sync
+        self.sync_results = list(sync_results)
         self.create_calls: list[dict[str, object]] = []
         self.cancel_calls: list[str] = []
         self.sync_calls = 0
@@ -69,6 +71,8 @@ class Bridge:
 
     async def get_order_info(self, external_order_id: str) -> MarketplaceSyncResult:
         self.sync_calls += 1
+        if self.sync_results:
+            return self.sync_results.pop(0)
         assert self.sync is not None
         return self.sync
 
@@ -278,7 +282,31 @@ def test_manual_requeue_cancels_and_replaces_active_attempt_atomically(
         order = _order(customer, ClientOrderStatus.PURCHASING)
         attempt = _attempt(order)
         state = _wire(monkeypatch, customer=customer, order=order, attempt=attempt)
-        bridge = Bridge(stock=(MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),))
+        bridge = Bridge(
+            stock=(MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),),
+            sync_results=(
+                MarketplaceSyncResult(
+                    attempt.rbxcreate_order_id,
+                    MarketplaceOrderStatus.ACTIVE,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                MarketplaceSyncResult(
+                    attempt.rbxcreate_order_id,
+                    MarketplaceOrderStatus.CANCELLED,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        )
         workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
 
         result = await workflows.manual_requeue(order.id)
@@ -290,6 +318,86 @@ def test_manual_requeue_cancels_and_replaces_active_attempt_atomically(
         assert replacement is not attempt
         assert replacement.marketplace_status is MarketplaceOrderStatus.ACTIVE
         assert order.current_status is ClientOrderStatus.PURCHASING
+
+    asyncio.run(scenario())
+
+
+def test_automatic_requeue_checks_status_then_replaces_once(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        attempt = _attempt(order)
+        state = _wire(monkeypatch, customer=customer, order=order, attempt=attempt)
+        bridge = Bridge(
+            sync_results=(
+                MarketplaceSyncResult(
+                    attempt.rbxcreate_order_id,
+                    MarketplaceOrderStatus.ACTIVE,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                MarketplaceSyncResult(
+                    attempt.rbxcreate_order_id,
+                    MarketplaceOrderStatus.CANCELLED,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+        )
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        result = await workflows.automatic_requeue(
+            order.id,
+            (MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),),
+        )
+
+        assert result.message == "Marketplace Order automatically requeued."
+        assert bridge.sync_calls == 2
+        assert bridge.cancel_calls == [attempt.rbxcreate_order_id]
+        assert len(bridge.create_calls) == 1
+        assert attempt.marketplace_status is MarketplaceOrderStatus.CANCELLED
+        assert state.saved_marketplace[-1].marketplace_status is MarketplaceOrderStatus.ACTIVE
+
+    asyncio.run(scenario())
+
+
+def test_automatic_requeue_never_replaces_completed_attempt(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        attempt = _attempt(order)
+        _wire(monkeypatch, customer=customer, order=order, attempt=attempt)
+        bridge = Bridge(
+            sync=MarketplaceSyncResult(
+                attempt.rbxcreate_order_id,
+                MarketplaceOrderStatus.COMPLETED,
+                1000,
+                0,
+                None,
+                Decimal("2.00"),
+                None,
+                None,
+            )
+        )
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        result = await workflows.automatic_requeue(
+            order.id,
+            (MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),),
+        )
+
+        assert result.message == "Order completed successfully."
+        assert bridge.cancel_calls == []
+        assert bridge.create_calls == []
+        assert order.current_status is ClientOrderStatus.COMPLETED
 
     asyncio.run(scenario())
 
@@ -376,13 +484,12 @@ def test_purchase_completed_notification_uses_persisted_financial_snapshot() -> 
         attempt,
         "viki_show2010435",
         Decimal("0.05"),
-        Decimal("90"),
     )
 
     assert "Purchased: 100 R$" in message
     assert "Client receives: 70 R$" in message
     assert "Rate: 3.9$" in message
-    assert "Marketplace cost: $0.39" in message
-    assert "Fee 5%: $0.02" in message
+    assert "Marketplace price: $0.39" in message
+    assert "commission: $0.02" in message
     assert "Total paid: $0.41" in message
     assert "Total RUB: 36.90 ₽" in message

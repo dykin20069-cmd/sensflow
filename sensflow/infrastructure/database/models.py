@@ -156,6 +156,34 @@ class CustomerPlaceIDHistory(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     customer: Mapped[Customer] = relationship(back_populates="place_id_history")
 
 
+class UserPlaceCache(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """The most recently selected Place ID for one normalized Roblox username."""
+
+    __tablename__ = "user_place_cache"
+    __table_args__ = (
+        CheckConstraint(
+            "length(btrim(roblox_username)) > 0",
+            name="roblox_username_not_empty",
+        ),
+        CheckConstraint("place_id > 0", name="place_id_positive"),
+        CheckConstraint("length(btrim(place_name)) > 0", name="place_name_not_empty"),
+        Index(
+            "uq_user_place_cache_roblox_username_lower",
+            text("lower(roblox_username)"),
+            unique=True,
+        ),
+    )
+
+    roblox_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    place_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    place_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class ClientOrder(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Primary customer purchase request."""
 
@@ -458,7 +486,10 @@ class SystemSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "system_settings"
     __table_args__ = (
         CheckConstraint("maximum_purchase_rate > 0", name="maximum_purchase_rate_positive"),
-        CheckConstraint("automatic_reorder_interval_seconds > 0", name="reorder_interval_positive"),
+        CheckConstraint(
+            "automatic_reorder_interval_seconds >= 0.3",
+            name="reorder_interval_minimum",
+        ),
         CheckConstraint(
             "marketplace_monitoring_interval_seconds > 0", name="monitoring_interval_positive"
         ),
@@ -481,7 +512,10 @@ class SystemSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         server_default=true(),
     )
-    automatic_reorder_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    automatic_reorder_interval_seconds: Mapped[Decimal] = mapped_column(
+        Numeric(8, 3),
+        nullable=False,
+    )
     marketplace_monitoring_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     synchronization_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     marketplace_commission: Mapped[Decimal] = mapped_column(

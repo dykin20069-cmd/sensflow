@@ -4,7 +4,6 @@ import asyncio
 import logging
 
 from sensflow.application.automation_loop import AutomationLoop
-from sensflow.application.gateways import UnavailableRobloxGateway
 from sensflow.application.lifecycle import Application
 from sensflow.application.marketplace_workflows import MarketplaceWorkflows
 from sensflow.application.notifications import NotificationService
@@ -25,6 +24,7 @@ from sensflow.infrastructure.database.session import (
 )
 from sensflow.infrastructure.logging import configure_logging
 from sensflow.integrations.rbxcreate import RbxcrateDryRunGateway, RbxcrateGateway
+from sensflow.integrations.roblox import RobloxPlaceResolver
 from sensflow.presentation.telegram import create_bot, create_dispatcher
 from sensflow.presentation.telegram.notifications import TelegramOperatorNotifier
 
@@ -34,7 +34,7 @@ def create_application(settings: Settings) -> Application:
     engine = create_database_engine(settings.database)
     sessions = create_session_factory(engine)
     bot = create_bot(settings.telegram)
-    roblox = UnavailableRobloxGateway()
+    roblox = RobloxPlaceResolver()
     rbxcrate_gateway = (
         RbxcrateDryRunGateway()
         if settings.rbxcrate.dry_run
@@ -67,6 +67,7 @@ def create_application(settings: Settings) -> Application:
     notifications = NotificationService(
         sessions,
         TelegramOperatorNotifier(bot, settings.telegram.operator_id),
+        recipient=settings.telegram.operator_id,
     )
     automation = AutomationLoop(
         sessions,
@@ -112,7 +113,7 @@ def create_application(settings: Settings) -> Application:
         dispatcher,
         recovery=recovery,
         automation=automation,
-        external_resources=(rbxcrate_gateway,),
+        external_resources=(rbxcrate_gateway, roblox),
     )
 
 
