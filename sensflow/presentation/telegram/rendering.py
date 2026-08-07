@@ -151,30 +151,36 @@ def render_current_stock(stock: CurrentStockDTO) -> Screen:
     for item in displayed_levels:
         if item.rate <= stock.preferred_rate:
             marker = "🟢"
-        elif item.rate <= STOCK_VIEW_THRESHOLD:
+        elif item.rate <= stock.maximum_purchase_rate:
             marker = "🟡"
         else:
             marker = "🔴"
+        rate = format_decimal(item.rate)
+        if "." not in rate:
+            rate = f"{rate}.0"
         lines.append(
-            f"{marker} {format_decimal(item.rate, '$')} — "
-            f"{item.total_robux_amount:,} R$ ({item.max_instant_order:,} instant)"
+            f"{marker} {rate}$ | 👥 {item.accounts_count:,} | "
+            f"💰 {item.total_robux_amount:,} R$ | ⚡ {item.max_instant_order:,} R$"
         )
     if above_threshold and ordered_levels:
         lines.append("Market currently above your viewing threshold.")
     body = "\n".join(lines) or "No stock is currently available."
-    total_available = sum(item.total_robux_amount for item in displayed_levels)
-    maximum_instant = max((item.max_instant_order for item in displayed_levels), default=0)
+    levels_within_limit = [
+        item for item in displayed_levels if item.rate <= stock.maximum_purchase_rate
+    ]
+    total_available = sum(item.total_robux_amount for item in levels_within_limit)
+    maximum_instant = max((item.max_instant_order for item in levels_within_limit), default=0)
     updated = stock.updated_at.astimezone(UTC).strftime("%H:%M:%S UTC")
     return Screen(
         text=(
             "<b>📊 Current RBXCrate Stock</b>\n\n"
             f"{body}\n\n"
             "━━━━━━━━━━━━\n"
-            f"Visible total: {total_available:,} R$\n"
-            f"Best instant: {maximum_instant:,} R$\n"
-            f"Your limit: ≤ {format_decimal(stock.maximum_purchase_rate, '$')}\n"
+            f"📦 Total within limit: {total_available:,} R$\n"
+            f"⚡ Best instant order: {maximum_instant:,} R$\n"
+            f"🎯 Limit: ≤ {format_decimal(stock.maximum_purchase_rate, '$')} | "
             f"Preferred: ≤ {format_decimal(stock.preferred_rate, '$')}\n"
-            f"Updated: {updated}"
+            f"🕒 {updated}"
         ),
         reply_markup=current_stock_keyboard(),
     )

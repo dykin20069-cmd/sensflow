@@ -82,16 +82,16 @@ def stock_snapshot() -> CurrentStockDTO:
 def test_stock_rendering_formats_rate_tiers_and_policy() -> None:
     screen = render_current_stock(stock_snapshot())
 
-    assert "🟢 4.2$ — 1,325 R$ (427 instant)" in screen.text
-    assert "🟢 4.3$ — 9,071 R$ (338 instant)" in screen.text
-    assert "🟡 4.5$ — 367 R$ (257 instant)" in screen.text
-    assert "🟡 4.8$ — 100 R$ (100 instant)" in screen.text
+    assert "🟢 4.2$ | 👥 3 | 💰 1,325 R$ | ⚡ 427 R$" in screen.text
+    assert "🟢 4.3$ | 👥 25 | 💰 9,071 R$ | ⚡ 338 R$" in screen.text
+    assert "🟡 4.5$ | 👥 1 | 💰 367 R$ | ⚡ 257 R$" in screen.text
+    assert "🔴 4.8$ | 👥 1 | 💰 100 R$ | ⚡ 100 R$" in screen.text
     assert "5.1$" not in screen.text
     assert "Accounts:" not in screen.text
-    assert "Visible total: 10,863 R$" in screen.text
-    assert "Best instant: 427 R$" in screen.text
-    assert "Your limit: ≤ 4.5$" in screen.text
-    assert "Updated: 14:54:12 UTC" in screen.text
+    assert "📦 Total within limit: 10,763 R$" in screen.text
+    assert "⚡ Best instant order: 427 R$" in screen.text
+    assert "🎯 Limit: ≤ 4.5$ | Preferred: ≤ 4.3$" in screen.text
+    assert "🕒 14:54:12 UTC" in screen.text
 
 
 def test_stock_rendering_places_cheapest_visible_level_last() -> None:
@@ -115,7 +115,25 @@ def test_stock_rendering_places_cheapest_visible_level_last() -> None:
         line.split()[1] for line in screen.text.splitlines() if line.startswith(("🟢", "🟡", "🔴"))
     ]
 
-    assert rendered_rates == ["5$", "4.8$", "4.5$", "3.9$"]
+    assert rendered_rates == ["5.0$", "4.8$", "4.5$", "3.9$"]
+
+
+def test_stock_footer_excludes_hidden_levels_even_when_within_purchase_limit() -> None:
+    stock = CurrentStockDTO(
+        items=(
+            MarketplaceStockDTO(Decimal("4.5"), 1, 70, 100),
+            MarketplaceStockDTO(Decimal("5.1"), 1, 900, 1_000),
+        ),
+        maximum_purchase_rate=Decimal("5.5"),
+        preferred_rate=Decimal("4.3"),
+        updated_at=datetime(2026, 8, 7, 22, 29, 49, tzinfo=UTC),
+    )
+
+    screen = render_current_stock(stock)
+
+    assert "5.1$" not in screen.text
+    assert "📦 Total within limit: 100 R$" in screen.text
+    assert "⚡ Best instant order: 70 R$" in screen.text
 
 
 def test_stock_rendering_falls_back_to_five_cheapest_levels() -> None:
@@ -144,16 +162,16 @@ def test_stock_rendering_falls_back_to_five_cheapest_levels() -> None:
     screen = render_current_stock(stock)
 
     assert "⚠️ No offers up to 5.0$" in screen.text
-    assert "🔴 5.1$ — 149,112 R$ (44,745 instant)" in screen.text
-    assert "🔴 5.2$ — 282,570 R$ (115,690 instant)" in screen.text
-    assert "🔴 5.3$ — 145,105 R$ (13,436 instant)" in screen.text
-    assert "🔴 5.4$ — 40 R$ (30 instant)" in screen.text
-    assert "🔴 5.5$ — 50 R$ (20 instant)" in screen.text
+    assert "🔴 5.1$ | 👥 1 | 💰 149,112 R$ | ⚡ 44,745 R$" in screen.text
+    assert "🔴 5.2$ | 👥 1 | 💰 282,570 R$ | ⚡ 115,690 R$" in screen.text
+    assert "🔴 5.3$ | 👥 1 | 💰 145,105 R$ | ⚡ 13,436 R$" in screen.text
+    assert "🔴 5.4$ | 👥 1 | 💰 40 R$ | ⚡ 30 R$" in screen.text
+    assert "🔴 5.5$ | 👥 1 | 💰 50 R$ | ⚡ 20 R$" in screen.text
     assert "5.6$" not in screen.text
     assert "Market currently above your viewing threshold." in screen.text
-    assert "Visible total: 576,877 R$" in screen.text
-    assert "Best instant: 115,690 R$" in screen.text
-    assert "Updated: 22:19:19 UTC" in screen.text
+    assert "📦 Total within limit: 0 R$" in screen.text
+    assert "⚡ Best instant order: 0 R$" in screen.text
+    assert "🕒 22:19:19 UTC" in screen.text
 
 
 def test_active_and_preorder_screens_expose_direct_production_actions() -> None:
