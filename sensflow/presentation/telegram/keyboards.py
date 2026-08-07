@@ -233,6 +233,11 @@ def order_list_keyboard(
         )
     builder.adjust(1)
     builder.row(*_pagination_buttons(pagination, scope=PageScope.ORDERS, key=key))
+    if key == ClientOrderStatus.PURCHASING.value:
+        builder.button(
+            text="📦 View PreOrders",
+            callback_data=MenuCallback(section=MainSection.PREORDERS),
+        )
     builder.attach(
         InlineKeyboardBuilder.from_markup(navigation_keyboard(back_target=NavigationTarget.ORDERS))
     )
@@ -249,7 +254,19 @@ def order_details_keyboard(
         OrderAction.EDIT_DRAFT: ("Edit Draft", OrderCallbackAction.EDIT_DRAFT),
         OrderAction.DELETE_DRAFT: ("Delete Draft", OrderCallbackAction.DELETE_DRAFT),
         OrderAction.START_PURCHASE: ("📦 Retry Stock Check", OrderCallbackAction.START_PURCHASE),
+        OrderAction.FORCE_PURCHASE: (
+            "🚀 Force Create Marketplace Order",
+            OrderCallbackAction.START_PURCHASE,
+        ),
         OrderAction.MANUAL_REORDER: ("🔄 Requeue Now", OrderCallbackAction.MANUAL_REORDER),
+        OrderAction.ENABLE_AUTO_REQUEUE: (
+            "▶️ Enable Auto Requeue",
+            OrderCallbackAction.TOGGLE_AUTO_REQUEUE,
+        ),
+        OrderAction.DISABLE_AUTO_REQUEUE: (
+            "⏸ Disable Auto Requeue",
+            OrderCallbackAction.TOGGLE_AUTO_REQUEUE,
+        ),
         OrderAction.CANCEL: ("❌ Cancel", OrderCallbackAction.CANCEL),
         OrderAction.REFRESH: ("🔄 Refresh Status", OrderCallbackAction.REFRESH),
         OrderAction.TIMELINE: ("📋 Details", OrderCallbackAction.TIMELINE),
@@ -342,6 +359,21 @@ def place_lookup_fallback_keyboard() -> InlineKeyboardMarkup:
             navigation_keyboard(back_target=NavigationTarget.CREATE_ORDER)
         )
     )
+    return builder.as_markup()
+
+
+def no_stock_fallback_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="📦 Send to PreOrders",
+        callback_data=PlaceCallback(action=PlaceCallbackAction.SEND_PREORDER),
+    )
+    builder.button(
+        text="🔄 Retry Stock Check",
+        callback_data=PlaceCallback(action=PlaceCallbackAction.RETRY_STOCK),
+    )
+    builder.adjust(1)
+    builder.attach(InlineKeyboardBuilder.from_markup(navigation_keyboard()))
     return builder.as_markup()
 
 

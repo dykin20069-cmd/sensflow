@@ -48,6 +48,7 @@ def create_application(settings: Settings) -> Application:
         maximum_purchase_rate=settings.marketplace.maximum_purchase_rate,
         automatic_reorder_enabled=settings.automation.automatic_reorder_enabled,
         automatic_reorder_interval_seconds=(settings.automation.automatic_reorder_interval_seconds),
+        auto_requeue_delay_seconds=settings.automation.auto_requeue_delay_seconds,
         marketplace_monitoring_interval_seconds=(
             settings.marketplace.stock_monitoring_interval_seconds
         ),

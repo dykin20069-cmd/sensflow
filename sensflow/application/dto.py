@@ -23,7 +23,10 @@ class OrderAction(StrEnum):
     EDIT_DRAFT = "edit_draft"
     DELETE_DRAFT = "delete_draft"
     START_PURCHASE = "start_purchase"
+    FORCE_PURCHASE = "force_purchase"
     MANUAL_REORDER = "manual_reorder"
+    ENABLE_AUTO_REQUEUE = "enable_auto_requeue"
+    DISABLE_AUTO_REQUEUE = "disable_auto_requeue"
     CANCEL = "cancel"
     REFRESH = "refresh"
     TIMELINE = "timeline"
@@ -57,6 +60,14 @@ class ActionResultDTO:
 
     message: str
     order_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StockAvailabilityDTO:
+    """Whether one requested amount fits the current persisted stock policy."""
+
+    available: bool
+    maximum_purchase_rate: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +151,9 @@ class OrderDetailDTO:
     waiting_seconds: int | None = None
     next_automatic_retry_seconds: Decimal | None = None
     remembered_place: bool = False
+    automatic_requeue_enabled: bool = True
+    requeue_attempts: int = 0
+    last_requeue_at: datetime | None = None
     available_actions: tuple[OrderAction, ...] = ()
 
 
@@ -227,6 +241,7 @@ class SettingsDTO:
     maximum_purchase_rate: Decimal
     automatic_reorder_enabled: bool
     automatic_reorder_interval_seconds: Decimal
+    auto_requeue_delay_seconds: Decimal
     marketplace_monitoring_interval_seconds: int
     synchronization_interval_seconds: int
     marketplace_commission: Decimal

@@ -80,16 +80,16 @@ def test_stock_notification_cooldown_prevents_duplicate_queue_rows() -> None:
             return_value=Repository(),
         ):
             first = await service.queue_once(
-                notification_type=NotificationType.AUTOMATIC_REORDER,
-                title="New stock appeared · 4.3",
+                notification_type=NotificationType.STOCK_AVAILABLE,
+                title="Suitable stock detected · 4.3",
                 message="stock",
-                throttle_seconds=300,
+                throttle_seconds=60,
             )
             second = await service.queue_once(
-                notification_type=NotificationType.AUTOMATIC_REORDER,
-                title="New stock appeared · 4.3",
+                notification_type=NotificationType.STOCK_AVAILABLE,
+                title="Suitable stock detected · 4.3",
                 message="stock",
-                throttle_seconds=300,
+                throttle_seconds=60,
             )
 
         assert first is True

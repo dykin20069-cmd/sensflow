@@ -77,7 +77,7 @@ class FinalizePurchaseCommand(Command):
     roblox_tax_rate: Decimal = Field(ge=0, lt=1)
     robux_rounding: Annotated[str, StringConstraints(min_length=1, max_length=32)]
     money_rounding: Annotated[str, StringConstraints(min_length=1, max_length=32)]
-    money_quantum: Decimal = Field(default=Decimal("0.0001"), gt=0)
+    money_quantum: Decimal = Field(default=Decimal("0.01"), gt=0)
 
 
 class CustomerActionCommand(OperatorCommand):

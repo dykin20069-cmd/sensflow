@@ -39,6 +39,7 @@ from sensflow.application.dto import (
     RememberedPlaceDTO,
     SettingsDTO,
     StatisticsDTO,
+    StockAvailabilityDTO,
     SystemStatusDTO,
     TimelineEventDTO,
     UsernameHistoryDTO,
@@ -141,7 +142,11 @@ def _bounded_page(requested_page: int, page_size: int, total_items: int) -> int:
     return min(requested_page, total_pages)
 
 
-def _order_actions(status: ClientOrderStatus) -> tuple[OrderAction, ...]:
+def _order_actions(
+    status: ClientOrderStatus,
+    *,
+    automatic_requeue_enabled: bool = True,
+) -> tuple[OrderAction, ...]:
     if status is ClientOrderStatus.DRAFT:
         return (
             OrderAction.CONFIRM_PAYMENT,
@@ -152,12 +157,18 @@ def _order_actions(status: ClientOrderStatus) -> tuple[OrderAction, ...]:
     if status is ClientOrderStatus.PREORDER:
         return (
             OrderAction.START_PURCHASE,
+            OrderAction.FORCE_PURCHASE,
             OrderAction.CANCEL,
             OrderAction.TIMELINE,
         )
     if status is ClientOrderStatus.PURCHASING:
         return (
             OrderAction.MANUAL_REORDER,
+            (
+                OrderAction.DISABLE_AUTO_REQUEUE
+                if automatic_requeue_enabled
+                else OrderAction.ENABLE_AUTO_REQUEUE
+            ),
             OrderAction.CANCEL,
             OrderAction.REFRESH,
             OrderAction.TIMELINE,
@@ -254,7 +265,13 @@ def _order_detail(
             reorder_interval if order.current_status is ClientOrderStatus.PREORDER else None
         ),
         remembered_place=remembered_place,
-        available_actions=_order_actions(order.current_status),
+        automatic_requeue_enabled=(order.automatic_requeue_enabled is not False),
+        requeue_attempts=order.requeue_attempts or 0,
+        last_requeue_at=order.last_requeue_at,
+        available_actions=_order_actions(
+            order.current_status,
+            automatic_requeue_enabled=(order.automatic_requeue_enabled is not False),
+        ),
     )
 
 
@@ -299,6 +316,7 @@ def _settings(settings: SystemSettings) -> SettingsDTO:
         maximum_purchase_rate=settings.maximum_purchase_rate,
         automatic_reorder_enabled=settings.automatic_reorder_enabled,
         automatic_reorder_interval_seconds=settings.automatic_reorder_interval_seconds,
+        auto_requeue_delay_seconds=settings.auto_requeue_delay_seconds,
         marketplace_monitoring_interval_seconds=settings.marketplace_monitoring_interval_seconds,
         synchronization_interval_seconds=settings.synchronization_interval_seconds,
         marketplace_commission=settings.marketplace_commission,
@@ -452,6 +470,14 @@ class OrderApplicationService:
             raise FeatureUnavailableError("Marketplace stock lookup")
         return await self._marketplace_workflows.get_current_stock()
 
+    async def check_stock(
+        self,
+        command: PrepareCreateOrderCommand,
+    ) -> StockAvailabilityDTO:
+        if self._marketplace_workflows is None:
+            raise FeatureUnavailableError("Marketplace stock lookup")
+        return await self._marketplace_workflows.check_stock(command.requested_robux)
+
     async def get_timeline(self, query: GetOrderQuery) -> tuple[TimelineEventDTO, ...]:
         return (await self.get_order(query)).timeline
 
@@ -589,13 +615,13 @@ class OrderApplicationService:
             remembered = await place_cache.get_by_username_for_update(command.username)
             if remembered is None:
                 remembered = UserPlaceCache(
-                    roblox_username=command.username,
+                    roblox_username=command.username.casefold(),
                     place_id=command.place_id,
                     place_name=command.place_name,
                     last_used_at=now,
                 )
             else:
-                remembered.roblox_username = command.username
+                remembered.roblox_username = command.username.casefold()
                 remembered.place_id = command.place_id
                 remembered.place_name = command.place_name
                 remembered.last_used_at = now
@@ -709,11 +735,85 @@ class OrderApplicationService:
             raise FeatureUnavailableError("Marketplace purchasing")
         return await self._marketplace_workflows.start_purchase(command.order_id)
 
+    async def send_to_preorder(self, command: OrderActionCommand) -> ActionResultDTO:
+        """Move an explicitly accepted Draft to the local PreOrder queue."""
+        _authorize(command.operator_id, self._operator_id)
+        try:
+            async with self._sessions.begin() as session:
+                orders = ClientOrderRepository(session)
+                order = await orders.get_for_update(command.order_id)
+                if order is None:
+                    raise NotFoundError("Client Order")
+                if order.current_status is ClientOrderStatus.PREORDER:
+                    return ActionResultDTO(
+                        message="PreOrder already exists.",
+                        order_id=order.id,
+                    )
+                if order.current_status is not ClientOrderStatus.DRAFT:
+                    raise DomainConflictError("Only a Draft can be sent to PreOrders")
+                customer = await CustomerRepository(session).get(order.customer_id)
+                if customer is None:
+                    raise NotFoundError("Customer")
+                now = self._clock()
+                timeline = TimelineEventRepository(session)
+                await timeline.save(
+                    create_timeline_event(
+                        order,
+                        TimelineEventType.PAYMENT_CONFIRMED,
+                        "Customer payment confirmed.",
+                        now,
+                    )
+                )
+                enter_preorder(order)
+                await orders.save(order)
+                await timeline.save(
+                    create_timeline_event(
+                        order,
+                        TimelineEventType.PREORDER_CREATED,
+                        "Operator accepted the local PreOrder fallback.",
+                        now + timedelta(microseconds=1),
+                    )
+                )
+                logger.info(
+                    "preorder_created",
+                    extra={
+                        "order_id": str(order.id),
+                        "customer": customer.current_username,
+                        "requested_robux": order.requested_robux,
+                        "place_id": order.current_place_id,
+                    },
+                )
+        except (DomainValidationError, DomainConflictError) as error:
+            _raise_domain_error(error)
+        return ActionResultDTO(message="PreOrder created.", order_id=command.order_id)
+
     async def manual_reorder(self, command: OrderActionCommand) -> ActionResultDTO:
         _authorize(command.operator_id, self._operator_id)
         if self._marketplace_workflows is None:
             raise FeatureUnavailableError("Manual reorder")
         return await self._marketplace_workflows.manual_requeue(command.order_id)
+
+    async def toggle_auto_requeue(self, command: OrderActionCommand) -> ActionResultDTO:
+        _authorize(command.operator_id, self._operator_id)
+        try:
+            async with self._sessions.begin() as session:
+                repository = ClientOrderRepository(session)
+                order = await repository.get_for_update(command.order_id)
+                if order is None:
+                    raise NotFoundError("Client Order")
+                if order.current_status is not ClientOrderStatus.PURCHASING:
+                    raise DomainConflictError(
+                        "Auto Requeue can be changed only for an active purchase"
+                    )
+                enabled = not (order.automatic_requeue_enabled is not False)
+                order.automatic_requeue_enabled = enabled
+                await repository.save(order)
+        except (DomainValidationError, DomainConflictError) as error:
+            _raise_domain_error(error)
+        return ActionResultDTO(
+            message=f"Auto Requeue {'enabled' if enabled else 'disabled'}.",
+            order_id=command.order_id,
+        )
 
     async def finalize_purchase(
         self,

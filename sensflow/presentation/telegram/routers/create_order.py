@@ -4,7 +4,11 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from sensflow.application.commands import CreateOrderCommand, PrepareCreateOrderCommand
+from sensflow.application.commands import (
+    CreateOrderCommand,
+    OrderActionCommand,
+    PrepareCreateOrderCommand,
+)
 from sensflow.application.dto import PlaceIDSelectionDTO
 from sensflow.application.errors import (
     ApplicationError,
@@ -35,10 +39,11 @@ from sensflow.presentation.telegram.formatting import escape_text
 from sensflow.presentation.telegram.keyboards import navigation_keyboard
 from sensflow.presentation.telegram.rendering import (
     Screen,
-    render_draft_created,
     render_main_menu,
+    render_no_suitable_stock,
     render_order_card,
     render_place_lookup_fallback,
+    render_preorder_created,
     render_public_places,
     render_remembered_place,
     render_similar_order,
@@ -404,15 +409,56 @@ async def _continue_with_place(
         await state.update_data(similar_order_id=str(similar.id))
         await show_screen(event, render_similar_order(similar))
         return
-    await _create_draft(event, state, orders, allow_duplicate=False)
+    await _check_stock(event, state, orders, allow_duplicate=False)
 
 
-async def _create_draft(
+async def _check_stock(
     event: Message | CallbackQuery,
     state: FSMContext,
     orders: OrderUseCases,
     *,
     allow_duplicate: bool,
+) -> None:
+    data = await state.get_data()
+    try:
+        command = validate_input(
+            PrepareCreateOrderCommand,
+            {
+                "username": data.get("username"),
+                "requested_robux": data.get("requested_robux"),
+            },
+        )
+        availability = await orders.check_stock(command)
+    except ApplicationError as error:
+        await show_error(event, error)
+        return
+    await state.update_data(allow_duplicate=allow_duplicate)
+    if not availability.available:
+        await state.set_state(CreateOrderStates.stock_unavailable)
+        await show_screen(
+            event,
+            render_no_suitable_stock(
+                command.requested_robux,
+                availability.maximum_purchase_rate,
+            ),
+        )
+        return
+    await _create_and_route(
+        event,
+        state,
+        orders,
+        allow_duplicate=allow_duplicate,
+        send_to_preorder=False,
+    )
+
+
+async def _create_and_route(
+    event: Message | CallbackQuery,
+    state: FSMContext,
+    orders: OrderUseCases,
+    *,
+    allow_duplicate: bool,
+    send_to_preorder: bool,
 ) -> None:
     data = await state.get_data()
     try:
@@ -429,19 +475,67 @@ async def _create_draft(
             },
         )
         result = await orders.create_order(command)
-        order = (
-            None
-            if result.order_id is None
-            else await orders.get_order(GetOrderQuery(order_id=result.order_id))
+        if result.order_id is None:
+            raise InputValidationError(("order_id: missing from create result",))
+        action = OrderActionCommand(
+            order_id=result.order_id,
+            operator_id=event.from_user.id,
         )
+        action_result = (
+            await orders.send_to_preorder(action)
+            if send_to_preorder
+            else await orders.start_purchase(action)
+        )
+        order = await orders.get_order(GetOrderQuery(order_id=result.order_id))
     except ApplicationError as error:
         await show_error(event, error)
         return
     await state.clear()
-    if order is None:
-        await show_screen(event, render_main_menu())
-        return
-    await show_screen(event, render_draft_created(order))
+    screen = (
+        render_preorder_created(order)
+        if order.status.value == "preorder"
+        else render_order_card(order, action_result.message)
+    )
+    await show_screen(event, screen)
+
+
+@router.callback_query(
+    CreateOrderStates.stock_unavailable,
+    PlaceCallback.filter(F.action == PlaceCallbackAction.SEND_PREORDER),
+)
+async def send_to_preorders(
+    callback: CallbackQuery,
+    state: FSMContext,
+    orders: OrderUseCases,
+) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    await _create_and_route(
+        callback,
+        state,
+        orders,
+        allow_duplicate=bool(data.get("allow_duplicate", False)),
+        send_to_preorder=True,
+    )
+
+
+@router.callback_query(
+    CreateOrderStates.stock_unavailable,
+    PlaceCallback.filter(F.action == PlaceCallbackAction.RETRY_STOCK),
+)
+async def retry_stock_check(
+    callback: CallbackQuery,
+    state: FSMContext,
+    orders: OrderUseCases,
+) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    await _check_stock(
+        callback,
+        state,
+        orders,
+        allow_duplicate=bool(data.get("allow_duplicate", False)),
+    )
 
 
 @router.callback_query(OrderCallback.filter(F.action == OrderCallbackAction.REUSE_SIMILAR))
@@ -471,7 +565,7 @@ async def create_duplicate_order(
     orders: OrderUseCases,
 ) -> None:
     await callback.answer()
-    await _create_draft(callback, state, orders, allow_duplicate=True)
+    await _check_stock(callback, state, orders, allow_duplicate=True)
 
 
 @router.callback_query(OrderCallback.filter(F.action == OrderCallbackAction.ABORT_CREATE))

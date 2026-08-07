@@ -4,6 +4,7 @@ import asyncio
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -67,6 +68,7 @@ def _settings() -> SystemSettings:
         maximum_purchase_rate=Decimal("2"),
         automatic_reorder_enabled=True,
         automatic_reorder_interval_seconds=60,
+        auto_requeue_delay_seconds=Decimal("5"),
         marketplace_monitoring_interval_seconds=60,
         synchronization_interval_seconds=60,
         marketplace_commission=Decimal("0.10"),
@@ -118,6 +120,16 @@ def _patch_repositories(
             "sensflow.application.marketplace_workflows.SystemSettingsRepository",
             return_value=settings,
         ),
+        patch(
+            "sensflow.application.marketplace_workflows.CustomerRepository",
+            return_value=SimpleNamespace(
+                get=AsyncMock(return_value=SimpleNamespace(current_username="builder"))
+            ),
+        ),
+        patch(
+            "sensflow.application.marketplace_workflows.UserPlaceCacheRepository",
+            return_value=SimpleNamespace(get_by_username_for_update=AsyncMock(return_value=None)),
+        ),
     )
 
 
@@ -140,7 +152,7 @@ def test_repeated_completion_finalizes_exactly_once() -> None:
         )
         workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
         patches = _patch_repositories(*repositories)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             first = await workflows.synchronize_marketplace_order(attempt.id)
             second = await workflows.synchronize_marketplace_order(attempt.id)
 
@@ -172,7 +184,7 @@ def test_repeated_cancellation_is_idempotent() -> None:
         )
         workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
         patches = _patch_repositories(*repositories)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             await workflows.synchronize_marketplace_order(attempt.id)
             repeated = await workflows.synchronize_marketplace_order(attempt.id)
 
@@ -202,7 +214,7 @@ def test_active_sync_preserves_progress_and_records_observed_price() -> None:
         )
         workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
         patches = _patch_repositories(*repositories)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             await workflows.synchronize_marketplace_order(attempt.id)
 
         assert attempt.purchased_robux == 100
@@ -221,7 +233,7 @@ def test_locally_completed_attempt_finalizes_unfinished_client_order() -> None:
         bridge.get_order_info = AsyncMock()
         workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
         patches = _patch_repositories(*repositories)
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             result = await workflows.synchronize_marketplace_order(attempt.id)
 
         assert result.message == "Order completed successfully."

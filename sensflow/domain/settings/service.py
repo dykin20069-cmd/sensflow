@@ -23,6 +23,7 @@ class SettingsDefaults:
     telegram_notifications_enabled: bool
     notification_categories: tuple[NotificationType, ...]
     application_timezone: str
+    auto_requeue_delay_seconds: Decimal = Decimal("5")
 
 
 def create_settings(defaults: SettingsDefaults) -> SystemSettings:
@@ -31,6 +32,7 @@ def create_settings(defaults: SettingsDefaults) -> SystemSettings:
         maximum_purchase_rate=defaults.maximum_purchase_rate,
         automatic_reorder_enabled=defaults.automatic_reorder_enabled,
         automatic_reorder_interval_seconds=defaults.automatic_reorder_interval_seconds,
+        auto_requeue_delay_seconds=defaults.auto_requeue_delay_seconds,
         marketplace_monitoring_interval_seconds=defaults.marketplace_monitoring_interval_seconds,
         synchronization_interval_seconds=defaults.synchronization_interval_seconds,
         marketplace_commission=defaults.marketplace_commission,
@@ -54,10 +56,12 @@ def update_setting(settings: SystemSettings, field: SettingField, raw_value: str
 def validate_settings(settings: SystemSettings) -> None:
     """Enforce all field-level SystemSettings invariants before persistence."""
     _positive_decimal(settings.maximum_purchase_rate, "Maximum purchase rate")
-    _nonnegative_decimal(settings.marketplace_commission, "Marketplace commission")
+    _rate_decimal(settings.marketplace_commission, "Marketplace commission")
     _positive_decimal(settings.usd_exchange_rate, "USD exchange rate")
     if settings.automatic_reorder_interval_seconds < Decimal("0.3"):
         raise DomainValidationError("Automatic reorder interval must be at least 0.3 seconds")
+    if settings.auto_requeue_delay_seconds < Decimal("0.3"):
+        raise DomainValidationError("Auto requeue delay must be at least 0.3 seconds")
     for value, name in (
         (settings.marketplace_monitoring_interval_seconds, "Marketplace monitoring interval"),
         (settings.synchronization_interval_seconds, "Synchronization interval"),
@@ -71,6 +75,7 @@ def _parse_setting(field: SettingField, raw_value: str) -> object:
     value = raw_value.strip()
     if field in {
         SettingField.AUTOMATIC_REORDER_INTERVAL_SECONDS,
+        SettingField.AUTO_REQUEUE_DELAY_SECONDS,
         SettingField.MAXIMUM_PURCHASE_RATE,
         SettingField.MARKETPLACE_COMMISSION,
         SettingField.USD_EXCHANGE_RATE,
@@ -121,9 +126,9 @@ def _positive_decimal(value: Decimal, name: str) -> None:
         raise DomainValidationError(f"{name} must be finite and greater than zero")
 
 
-def _nonnegative_decimal(value: Decimal, name: str) -> None:
-    if not value.is_finite() or value < 0:
-        raise DomainValidationError(f"{name} must be finite and non-negative")
+def _rate_decimal(value: Decimal, name: str) -> None:
+    if not value.is_finite() or not Decimal("0") <= value <= Decimal("1"):
+        raise DomainValidationError(f"{name} must be a decimal rate between 0 and 1")
 
 
 def _timezone(value: str) -> None:

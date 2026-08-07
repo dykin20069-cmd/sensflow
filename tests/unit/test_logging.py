@@ -25,6 +25,7 @@ def test_json_formatter_emits_structured_log_record() -> None:
     assert payload["level"] == "INFO"
     assert payload["logger"] == "sensflow.test"
     assert payload["message"] == "application_started"
+    assert payload["event"] == "application_started"
     assert payload["timestamp"].endswith("Z")
 
 

@@ -83,6 +83,7 @@ def settings_row() -> SystemSettings:
         maximum_purchase_rate=Decimal("1.25"),
         automatic_reorder_enabled=True,
         automatic_reorder_interval_seconds=300,
+        auto_requeue_delay_seconds=Decimal("5"),
         marketplace_monitoring_interval_seconds=30,
         synchronization_interval_seconds=20,
         marketplace_commission=Decimal("0.05"),
@@ -139,6 +140,70 @@ def test_payment_confirmation_routes_to_preorder_and_appends_timeline_atomically
             TimelineEventType.PREORDER_CREATED,
         ]
         assert "PreOrder" in result.message
+
+    asyncio.run(exercise())
+
+
+def test_explicit_preorder_fallback_transitions_the_draft_without_marketplace_call() -> None:
+    async def exercise() -> None:
+        order = draft()
+        orders = MagicMock()
+        orders.get_for_update = AsyncMock(return_value=order)
+        orders.save = AsyncMock(side_effect=lambda value: value)
+        customers = MagicMock()
+        customers.get = AsyncMock(return_value=SimpleNamespace(current_username="Builderman"))
+        timeline = MagicMock()
+        timeline.save = AsyncMock(side_effect=lambda value: value)
+        marketplace = SimpleNamespace(create_order=AsyncMock())
+        service = OrderApplicationService(
+            TransactionFactory(),
+            marketplace=marketplace,
+            operator_id=42,
+            clock=lambda: NOW,
+        )
+
+        with (
+            patch("sensflow.application.services.ClientOrderRepository", return_value=orders),
+            patch("sensflow.application.services.CustomerRepository", return_value=customers),
+            patch("sensflow.application.services.TimelineEventRepository", return_value=timeline),
+        ):
+            result = await service.send_to_preorder(
+                OrderActionCommand(order_id=order.id, operator_id=42)
+            )
+
+        assert result.message == "PreOrder created."
+        assert result.order_id == order.id
+        assert order.current_status is ClientOrderStatus.PREORDER
+        assert [call.args[0].event_type for call in timeline.save.await_args_list] == [
+            TimelineEventType.PAYMENT_CONFIRMED,
+            TimelineEventType.PREORDER_CREATED,
+        ]
+        marketplace.create_order.assert_not_awaited()
+
+    asyncio.run(exercise())
+
+
+def test_operator_can_disable_auto_requeue_for_one_active_order() -> None:
+    async def exercise() -> None:
+        order = draft()
+        order.current_status = ClientOrderStatus.PURCHASING
+        order.automatic_requeue_enabled = True
+        orders = MagicMock()
+        orders.get_for_update = AsyncMock(return_value=order)
+        orders.save = AsyncMock(side_effect=lambda value: value)
+        service = OrderApplicationService(TransactionFactory(), operator_id=42)
+
+        with patch(
+            "sensflow.application.services.ClientOrderRepository",
+            return_value=orders,
+        ):
+            result = await service.toggle_auto_requeue(
+                OrderActionCommand(order_id=order.id, operator_id=42)
+            )
+
+        assert order.automatic_requeue_enabled is False
+        assert result.message == "Auto Requeue disabled."
+        orders.save.assert_awaited_once_with(order)
 
     asyncio.run(exercise())
 
@@ -214,7 +279,7 @@ def test_create_order_persists_manual_customer_and_draft_without_roblox_lookup()
         assert str(order_id) in result.message
         assert result.order_id == order_id
         remembered = place_cache.save.await_args.args[0]
-        assert remembered.roblox_username == "Builderman"
+        assert remembered.roblox_username == "builderman"
         assert remembered.place_id == 200
 
     asyncio.run(exercise())

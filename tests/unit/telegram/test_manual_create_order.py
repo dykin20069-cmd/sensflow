@@ -16,6 +16,7 @@ from sensflow.application.dto import (
     OrderDetailDTO,
     PlaceIDSelectionDTO,
     PublicPlaceDTO,
+    StockAvailabilityDTO,
 )
 from sensflow.domain.enums import ClientOrderStatus
 from sensflow.presentation.telegram.callbacks import PlaceCallback, PlaceCallbackAction
@@ -25,6 +26,7 @@ from sensflow.presentation.telegram.routers.create_order import (
     receive_requested_robux,
     receive_username,
     select_public_place,
+    send_to_preorders,
     use_remembered_place,
 )
 from sensflow.presentation.telegram.states import CreateOrderStates
@@ -93,7 +95,23 @@ def draft_details(order_id: UUID) -> OrderDetailDTO:
     )
 
 
-def test_manual_create_order_conversation_creates_and_renders_draft() -> None:
+def preorder_details(order_id: UUID) -> OrderDetailDTO:
+    return replace(
+        draft_details(order_id),
+        status=ClientOrderStatus.PREORDER,
+        available_actions=(OrderAction.START_PURCHASE, OrderAction.CANCEL, OrderAction.TIMELINE),
+    )
+
+
+def purchasing_details(order_id: UUID) -> OrderDetailDTO:
+    return replace(
+        draft_details(order_id),
+        status=ClientOrderStatus.PURCHASING,
+        available_actions=(OrderAction.MANUAL_REORDER, OrderAction.CANCEL, OrderAction.TIMELINE),
+    )
+
+
+def test_manual_create_order_offers_and_creates_preorder_when_stock_is_unavailable() -> None:
     async def scenario() -> None:
         state = MemoryState()
         orders = MagicMock()
@@ -105,13 +123,22 @@ def test_manual_create_order_conversation_creates_and_renders_draft() -> None:
             )
         )
         orders.find_similar_order = AsyncMock(return_value=None)
+        orders.check_stock = AsyncMock(
+            return_value=StockAvailabilityDTO(
+                available=False,
+                maximum_purchase_rate=Decimal("4.5"),
+            )
+        )
         orders.create_order = AsyncMock(
             return_value=ActionResultDTO(
                 message=f"Draft order {order_id} was created.",
                 order_id=order_id,
             )
         )
-        orders.get_order = AsyncMock(return_value=draft_details(order_id))
+        orders.send_to_preorder = AsyncMock(
+            return_value=ActionResultDTO(message="PreOrder created.", order_id=order_id)
+        )
+        orders.get_order = AsyncMock(return_value=preorder_details(order_id))
         username_message = telegram_message("viki_show2010435")
         amount_message = telegram_message("100")
         place_message = telegram_message("1234567890")
@@ -130,27 +157,40 @@ def test_manual_create_order_conversation_creates_and_renders_draft() -> None:
             orders,
         )
 
+        assert state.current == CreateOrderStates.stock_unavailable
+        assert state.cleared is False
+        orders.create_order.assert_not_awaited()
+        no_stock_text = place_message.answer.await_args.args[0]
+        no_stock_markup = place_message.answer.await_args.kwargs["reply_markup"]
+        assert "No suitable stock available" in no_stock_text
+        assert "Requested: 100 R$" in no_stock_text
+        assert "Current limit: ≤ 4.5$" in no_stock_text
+        assert "📦 Send to PreOrders" in [
+            button.text for row in no_stock_markup.inline_keyboard for button in row
+        ]
+
+        callback = telegram_callback()
+        await send_to_preorders(callback, state, orders)  # type: ignore[arg-type]
+
         command = orders.create_order.await_args.args[0]
         assert command.username == "viki_show2010435"
         assert command.requested_robux == 100
         assert command.place_id == 1_234_567_890
         assert command.operator_id == 42
         orders.prepare_create_order.assert_awaited_once()
+        orders.send_to_preorder.assert_awaited_once()
         orders.get_order.assert_awaited_once()
         assert state.cleared is True
 
-        text = place_message.answer.await_args.args[0]
-        markup = place_message.answer.await_args.kwargs["reply_markup"]
-        assert "Draft Created" in text
-        assert str(order_id) in text
+        text = callback.message.edit_text.await_args.args[0]
+        markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+        assert "PreOrder created" in text
         assert "viki_show2010435" in text
         assert "100 R$" in text
         assert "1234567890" in text
-        assert "Status: Draft" in text
         labels = [button.text for row in markup.inline_keyboard for button in row]
-        assert "Confirm Payment" in labels
-        assert "Edit Draft" in labels
-        assert "Delete Draft" in labels
+        assert "📦 Retry Stock Check" in labels
+        assert "❌ Cancel" in labels
 
     asyncio.run(scenario())
 
@@ -219,10 +259,14 @@ def test_create_another_sets_explicit_duplicate_override() -> None:
         state.current = CreateOrderStates.duplicate_confirmation
         order_id = uuid4()
         orders = MagicMock()
+        orders.check_stock = AsyncMock(return_value=StockAvailabilityDTO(True, Decimal("4.5")))
         orders.create_order = AsyncMock(
             return_value=ActionResultDTO(message="created", order_id=order_id)
         )
-        orders.get_order = AsyncMock(return_value=draft_details(order_id))
+        orders.start_purchase = AsyncMock(
+            return_value=ActionResultDTO(message="Purchase started.", order_id=order_id)
+        )
+        orders.get_order = AsyncMock(return_value=purchasing_details(order_id))
         callback = telegram_callback()
 
         await create_duplicate_order(callback, state, orders)  # type: ignore[arg-type]
@@ -230,12 +274,12 @@ def test_create_another_sets_explicit_duplicate_override() -> None:
         command = orders.create_order.await_args.args[0]
         assert command.allow_duplicate is True
         assert state.cleared is True
-        assert "Draft Created" in callback.message.edit_text.await_args.args[0]
+        assert "Active Order" in callback.message.edit_text.await_args.args[0]
 
     asyncio.run(scenario())
 
 
-def test_public_place_selection_creates_verified_draft() -> None:
+def test_public_place_selection_creates_verified_purchase() -> None:
     async def scenario() -> None:
         state = MemoryState()
         order_id = uuid4()
@@ -257,17 +301,21 @@ def test_public_place_selection_creates_verified_draft() -> None:
             )
         )
         orders.find_similar_order = AsyncMock(return_value=None)
+        orders.check_stock = AsyncMock(return_value=StockAvailabilityDTO(True, Decimal("4.5")))
         orders.create_order = AsyncMock(
             return_value=ActionResultDTO(message="created", order_id=order_id)
         )
-        orders.get_order = AsyncMock(return_value=draft_details(order_id))
+        orders.start_purchase = AsyncMock(
+            return_value=ActionResultDTO(message="Purchase started.", order_id=order_id)
+        )
+        orders.get_order = AsyncMock(return_value=purchasing_details(order_id))
 
         await receive_username(telegram_message("verifieduser"), state)  # type: ignore[arg-type]
         amount = telegram_message("100")
         await receive_requested_robux(amount, state, orders)  # type: ignore[arg-type]
 
         assert state.current == CreateOrderStates.place_selection
-        assert "Found public places for VerifiedUser" in amount.answer.await_args.args[0]
+        assert "Public places for VerifiedUser" in amount.answer.await_args.args[0]
         assert "1.2M visits" in amount.answer.await_args.args[0]
 
         callback = telegram_callback()
@@ -283,12 +331,12 @@ def test_public_place_selection_creates_verified_draft() -> None:
         assert command.roblox_user_id == 42
         assert command.place_id == 1_234_567_890
         assert command.place_name == "My Tycoon"
-        assert "Draft Created" in callback.message.edit_text.await_args.args[0]
+        assert "Active Order" in callback.message.edit_text.await_args.args[0]
 
     asyncio.run(scenario())
 
 
-def test_remembered_place_creates_draft_in_one_tap() -> None:
+def test_remembered_place_has_priority_and_starts_purchase_in_one_tap() -> None:
     async def scenario() -> None:
         state = MemoryState()
         state.data = {
@@ -303,10 +351,14 @@ def test_remembered_place_creates_draft_in_one_tap() -> None:
         order_id = uuid4()
         orders = MagicMock()
         orders.find_similar_order = AsyncMock(return_value=None)
+        orders.check_stock = AsyncMock(return_value=StockAvailabilityDTO(True, Decimal("4.5")))
         orders.create_order = AsyncMock(
             return_value=ActionResultDTO(message="created", order_id=order_id)
         )
-        orders.get_order = AsyncMock(return_value=draft_details(order_id))
+        orders.start_purchase = AsyncMock(
+            return_value=ActionResultDTO(message="Purchase started.", order_id=order_id)
+        )
+        orders.get_order = AsyncMock(return_value=purchasing_details(order_id))
         callback = telegram_callback()
 
         await use_remembered_place(callback, state, orders)  # type: ignore[arg-type]

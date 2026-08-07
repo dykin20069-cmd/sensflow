@@ -111,11 +111,13 @@ class NotificationService:
                     notification.delivery_status = NotificationDeliveryStatus.DELIVERED
                     notification.delivered_at = utc_now()
                     delivered += 1
-                    if notification.title.startswith("New stock appeared · "):
+                    if notification.notification_type is NotificationType.STOCK_AVAILABLE:
                         logger.info(
                             "stock_notification_sent",
                             extra={
-                                "rate": notification.title.removeprefix("New stock appeared · "),
+                                "rate": notification.title.removeprefix(
+                                    "Suitable stock detected · "
+                                ),
                                 "recipient": str(self._recipient),
                             },
                         )

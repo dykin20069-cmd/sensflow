@@ -25,6 +25,7 @@ from sensflow.application.dto import (
     PlaceIDSelectionDTO,
     SettingsDTO,
     StatisticsDTO,
+    StockAvailabilityDTO,
     SystemStatusDTO,
     TimelineEventDTO,
 )
@@ -54,6 +55,8 @@ class OrderUseCases(Protocol):
 
     async def get_current_stock(self) -> CurrentStockDTO: ...
 
+    async def check_stock(self, command: PrepareCreateOrderCommand) -> StockAvailabilityDTO: ...
+
     async def get_timeline(self, query: GetOrderQuery) -> tuple[TimelineEventDTO, ...]: ...
 
     async def prepare_create_order(
@@ -74,7 +77,11 @@ class OrderUseCases(Protocol):
 
     async def start_purchase(self, command: OrderActionCommand) -> ActionResultDTO: ...
 
+    async def send_to_preorder(self, command: OrderActionCommand) -> ActionResultDTO: ...
+
     async def manual_reorder(self, command: OrderActionCommand) -> ActionResultDTO: ...
+
+    async def toggle_auto_requeue(self, command: OrderActionCommand) -> ActionResultDTO: ...
 
     async def cancel_order(self, command: OrderActionCommand) -> ActionResultDTO: ...
 

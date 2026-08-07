@@ -9,6 +9,7 @@ class CreateOrderStates(StatesGroup):
     place_selection = State()
     manual_place_id = State()
     duplicate_confirmation = State()
+    stock_unavailable = State()
 
 
 class OrderSearchStates(StatesGroup):

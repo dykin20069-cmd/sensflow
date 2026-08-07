@@ -18,13 +18,15 @@ def test_migration_chain_has_nullable_customer_identity_revision() -> None:
     revisions = list(scripts.walk_revisions())
 
     assert [item.revision for item in revisions] == [
+        "20260807_0004",
         "20260807_0003",
         "20260807_0002",
         "20260806_0001",
     ]
-    assert revisions[0].down_revision == "20260807_0002"
-    assert revisions[1].down_revision == "20260806_0001"
-    assert revisions[2].down_revision is None
+    assert revisions[0].down_revision == "20260807_0003"
+    assert revisions[1].down_revision == "20260807_0002"
+    assert revisions[2].down_revision == "20260806_0001"
+    assert revisions[3].down_revision is None
 
 
 def test_initial_migration_renders_complete_upgrade_sql() -> None:
@@ -61,6 +63,14 @@ def test_initial_migration_renders_complete_upgrade_sql() -> None:
     assert "TYPE NUMERIC(8, 3)" in sql
     assert "SET automatic_reorder_interval_seconds = 0.3" in sql
     assert "automatic_reorder_interval_seconds >= 0.3" in sql
+    assert "ADD VALUE IF NOT EXISTS 'stock_available'" in sql
+    assert "ADD COLUMN automatic_requeue_enabled BOOLEAN DEFAULT true NOT NULL" in sql
+    assert "ADD COLUMN last_requeue_at TIMESTAMP WITH TIME ZONE" in sql
+    assert "ADD COLUMN requeue_attempts INTEGER DEFAULT 0 NOT NULL" in sql
+    assert "ADD COLUMN auto_requeue_delay_seconds NUMERIC(8, 3) DEFAULT 5 NOT NULL" in sql
+    assert "auto_requeue_delay_seconds >= 0.3" in sql
+    assert "marketplace_commission = marketplace_commission / 100" in sql
+    assert "marketplace_commission >= 0 AND marketplace_commission <= 1" in sql
     assert "CREATE UNIQUE INDEX uq_system_settings_singleton" in sql
     assert sql.count("CREATE FUNCTION reject_protected_row_change()") == 1
     for trigger_name in (
@@ -114,3 +124,19 @@ def test_place_cache_migration_has_guarded_interval_downgrade() -> None:
     assert "Cannot downgrade while subsecond automatic reorder intervals exist" in sql
     assert "DROP TABLE user_place_cache" in sql
     assert "TYPE INTEGER" in sql
+
+
+def test_final_v1_migration_has_guarded_notification_downgrade() -> None:
+    output = StringIO()
+
+    command.downgrade(
+        alembic_config(output),
+        "20260807_0004:20260807_0003",
+        sql=True,
+    )
+
+    sql = output.getvalue()
+    assert "Cannot downgrade while final V1 notification rows exist" in sql
+    assert "DROP COLUMN auto_requeue_delay_seconds" in sql
+    assert "DROP COLUMN automatic_requeue_enabled" in sql
+    assert "DROP TYPE notification_type_final_v1" in sql

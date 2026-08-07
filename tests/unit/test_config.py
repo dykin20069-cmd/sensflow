@@ -28,6 +28,7 @@ def test_load_settings_parses_all_groups(valid_environment: dict[str, str]) -> N
     assert settings.marketplace.minimum_purchase_rate == Decimal("0")
     assert settings.marketplace.maximum_purchase_rate == Decimal("1.25")
     assert settings.automation.automatic_reorder_enabled is False
+    assert settings.automation.auto_requeue_delay_seconds == Decimal("5")
     assert settings.finance.usd_exchange_rate == Decimal("90.50")
 
 
@@ -143,6 +144,11 @@ def test_purchase_rate_bounds_and_positive_intervals_fail_fast(
     valid_environment["MARKETPLACE_SYNC_INTERVAL_SECONDS"] = "1"
     valid_environment["AUTOMATIC_REORDER_INTERVAL_SECONDS"] = "0.2"
     with pytest.raises(ConfigurationError, match="automatic_reorder_interval_seconds"):
+        load_settings(valid_environment)
+
+    valid_environment["AUTOMATIC_REORDER_INTERVAL_SECONDS"] = "0.3"
+    valid_environment["AUTO_REQUEUE_DELAY_SECONDS"] = "0.2"
+    with pytest.raises(ConfigurationError, match="auto_requeue_delay_seconds"):
         load_settings(valid_environment)
 
 

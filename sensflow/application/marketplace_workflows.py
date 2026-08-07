@@ -11,7 +11,12 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from sensflow.application.dto import ActionResultDTO, CurrentStockDTO, MarketplaceStockDTO
+from sensflow.application.dto import (
+    ActionResultDTO,
+    CurrentStockDTO,
+    MarketplaceStockDTO,
+    StockAvailabilityDTO,
+)
 from sensflow.application.errors import (
     ConflictError,
     MarketplaceIntegrationError,
@@ -65,6 +70,7 @@ from sensflow.repositories import (
     NotificationRepository,
     SystemSettingsRepository,
     TimelineEventRepository,
+    UserPlaceCacheRepository,
 )
 
 SessionFactory = async_sessionmaker[AsyncSession]
@@ -79,7 +85,7 @@ class FinancePolicy:
     roblox_tax_rate: Decimal = Decimal("0.30")
     robux_rounding: str = ROUND_DOWN
     money_rounding: str = ROUND_HALF_UP
-    money_quantum: Decimal = Decimal("0.0001")
+    money_quantum: Decimal = Decimal("0.01")
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +94,7 @@ class AutomationStockPlan:
 
     order_ids: tuple[UUID, ...]
     stock: tuple[MarketplaceStock, ...]
+    minimum_purchase_rate: Decimal
     maximum_purchase_rate: Decimal
 
 
@@ -131,6 +138,22 @@ class MarketplaceWorkflows:
             updated_at=self._clock(),
         )
 
+    async def check_stock(self, requested_robux: int) -> StockAvailabilityDTO:
+        """Check one amount against one live snapshot and the persisted rate policy."""
+        async with self._sessions.begin() as session:
+            settings = await self._get_settings(session)
+            stock = await self._bridge.get_detailed_stock()
+        selected = _select_stock(
+            stock,
+            requested_robux=requested_robux,
+            minimum_purchase_rate=self._minimum_purchase_rate,
+            maximum_purchase_rate=settings.maximum_purchase_rate,
+        )
+        return StockAvailabilityDTO(
+            available=selected is not None,
+            maximum_purchase_rate=settings.maximum_purchase_rate,
+        )
+
     async def plan_preorders(
         self,
         candidates: tuple[tuple[UUID, int], ...],
@@ -163,6 +186,7 @@ class MarketplaceWorkflows:
         return AutomationStockPlan(
             order_ids=order_ids,
             stock=stock,
+            minimum_purchase_rate=self._minimum_purchase_rate,
             maximum_purchase_rate=settings.maximum_purchase_rate,
         )
 
@@ -182,7 +206,11 @@ class MarketplaceWorkflows:
 
                 now = self._clock()
                 timeline = TimelineEventRepository(session)
-                if order.current_status is ClientOrderStatus.DRAFT:
+                customer = await CustomerRepository(session).get(order.customer_id)
+                if customer is None:
+                    raise NotFoundError("Customer")
+                was_draft = order.current_status is ClientOrderStatus.DRAFT
+                if was_draft:
                     await timeline.save(
                         create_timeline_event(
                             order,
@@ -201,32 +229,32 @@ class MarketplaceWorkflows:
                     maximum_purchase_rate=settings.maximum_purchase_rate,
                 )
                 if selected is None:
-                    if order.current_status is ClientOrderStatus.DRAFT:
+                    if was_draft:
                         enter_preorder(order)
                     await orders.save(order)
-                    await timeline.save(
-                        create_timeline_event(
-                            order,
-                            TimelineEventType.PREORDER_CREATED,
-                            "No stock satisfies the quantity, instant-order, and rate limits.",
-                            now + timedelta(microseconds=1),
+                    if was_draft:
+                        await timeline.save(
+                            create_timeline_event(
+                                order,
+                                TimelineEventType.PREORDER_CREATED,
+                                "No stock satisfies the quantity, instant-order, and rate limits.",
+                                now + timedelta(microseconds=1),
+                            )
                         )
-                    )
-                    logger.info(
-                        "marketplace_purchase_deferred",
-                        extra={
-                            "order_id": str(order.id),
-                            "customer_id": str(order.customer_id),
-                            "requested_robux": order.requested_robux,
-                        },
-                    )
+                        logger.info(
+                            "preorder_created",
+                            extra={
+                                "order_id": str(order.id),
+                                "customer": customer.current_username,
+                                "requested_robux": order.requested_robux,
+                                "place_id": order.current_place_id,
+                            },
+                        )
                     return ActionResultDTO(
-                        message="No suitable stock available; order moved to PreOrder."
+                        message="No suitable stock available; order is waiting in PreOrders.",
+                        order_id=order.id,
                     )
 
-                customer = await CustomerRepository(session).get(order.customer_id)
-                if customer is None:
-                    raise NotFoundError("Customer")
                 active = await MarketplaceOrderRepository(
                     session
                 ).get_active_for_client_order_for_update(order.id)
@@ -403,6 +431,8 @@ class MarketplaceWorkflows:
                             message="Order no longer requires automatic requeue."
                         )
                     raise DomainConflictError("Only an active purchase can be requeued")
+                if automatic and order.automatic_requeue_enabled is False:
+                    return ActionResultDTO(message="Automatic requeue is disabled for this order.")
 
                 marketplace_orders = MarketplaceOrderRepository(session)
                 active = await marketplace_orders.get_active_for_client_order_for_update(order.id)
@@ -414,6 +444,30 @@ class MarketplaceWorkflows:
                     )
 
                 settings = await self._get_settings(session)
+                now = self._clock()
+                delay = settings.auto_requeue_delay_seconds or Decimal("5")
+                requeue_anchor = order.last_requeue_at or active.created_at
+                if (
+                    automatic
+                    and requeue_anchor is not None
+                    and now - requeue_anchor < timedelta(seconds=float(delay))
+                ):
+                    return ActionResultDTO(message="Automatic requeue delay has not elapsed.")
+
+                customer = await CustomerRepository(session).get(order.customer_id)
+                if customer is None:
+                    raise NotFoundError("Customer")
+                expected_active_id = active.id
+                expected_external_id = active.rbxcreate_order_id
+                initial_status = await self._bridge.get_order_info(active.rbxcreate_order_id)
+                if initial_status.status is not MarketplaceOrderStatus.ACTIVE:
+                    return await self._apply_synchronization(
+                        session,
+                        order,
+                        active,
+                        initial_status,
+                    )
+
                 current_stock = await self._bridge.get_detailed_stock() if stock is None else stock
                 selected = _select_stock(
                     current_stock,
@@ -429,31 +483,38 @@ class MarketplaceWorkflows:
                     )
                     return ActionResultDTO(message=message)
 
-                customer = await CustomerRepository(session).get(order.customer_id)
-                if customer is None:
-                    raise NotFoundError("Customer")
+                attempt_number = (order.requeue_attempts or 0) + 2
                 if automatic:
                     logger.info(
-                        "auto_reorder_started",
+                        "auto_requeue_started",
                         extra={
                             "order_id": str(order.id),
-                            "previous_marketplace_order_id": str(active.id),
+                            "marketplace_order_id": str(active.id),
+                            "external_order_id": active.rbxcreate_order_id,
+                            "customer": customer.current_username,
+                            "requested_robux": order.requested_robux,
+                            "requeue_attempt": attempt_number,
                         },
                     )
+                    if _notification_enabled(settings, NotificationType.AUTO_REQUEUE_STARTED):
+                        await NotificationRepository(session).save(
+                            Notification(
+                                client_order_id=order.id,
+                                notification_type=NotificationType.AUTO_REQUEUE_STARTED,
+                                title="Auto Requeue Started",
+                                message=_format_auto_requeue_started_notification(
+                                    customer.current_username,
+                                    order,
+                                    active.rbxcreate_order_id,
+                                    delay,
+                                    attempt_number,
+                                ),
+                                delivery_status=NotificationDeliveryStatus.PENDING,
+                            )
+                        )
 
-                initial_status = await self._bridge.get_order_info(active.rbxcreate_order_id)
-                if initial_status.status is MarketplaceOrderStatus.COMPLETED:
-                    return await self._apply_synchronization(
-                        session,
-                        order,
-                        active,
-                        initial_status,
-                    )
-                if initial_status.status is MarketplaceOrderStatus.ACTIVE:
-                    await self._bridge.cancel_order(active.rbxcreate_order_id)
-                    confirmed_status = await self._bridge.get_order_info(active.rbxcreate_order_id)
-                else:
-                    confirmed_status = initial_status
+                await self._bridge.cancel_order(active.rbxcreate_order_id)
+                confirmed_status = await self._bridge.get_order_info(active.rbxcreate_order_id)
 
                 if confirmed_status.status is MarketplaceOrderStatus.COMPLETED:
                     return await self._apply_synchronization(
@@ -463,12 +524,19 @@ class MarketplaceWorkflows:
                         confirmed_status,
                     )
                 if confirmed_status.status is not MarketplaceOrderStatus.CANCELLED:
-                    message = (
-                        "Cancellation is not confirmed; automatic retry remains scheduled."
-                        if automatic
-                        else "Cancellation is not confirmed; the active order was retained."
+                    if automatic:
+                        raise MarketplaceIntegrationError(
+                            "RBXCrate did not confirm cancellation; "
+                            "automatic retry remains scheduled"
+                        )
+                    return ActionResultDTO(
+                        message="Cancellation is not confirmed; the active order was retained."
                     )
-                    return ActionResultDTO(message=message)
+                if (
+                    active.id != expected_active_id
+                    or active.rbxcreate_order_id != expected_external_id
+                ):
+                    raise DomainConflictError("The active Marketplace Order changed concurrently")
 
                 await self._apply_synchronization(
                     session,
@@ -497,9 +565,11 @@ class MarketplaceWorkflows:
                     ),
                     active_order_exists=False,
                 )
+                requeue_time = self._clock()
+                order.last_requeue_at = requeue_time
+                order.requeue_attempts = (order.requeue_attempts or 0) + 1
                 await orders.save(order)
                 await marketplace_orders.save(replacement)
-                now = self._clock()
                 timeline = TimelineEventRepository(session)
                 await timeline.save(
                     create_timeline_event(
@@ -514,7 +584,7 @@ class MarketplaceWorkflows:
                             if automatic
                             else "Operator cancelled the active attempt and requeued the order."
                         ),
-                        now + timedelta(microseconds=1),
+                        requeue_time + timedelta(microseconds=1),
                     )
                 )
                 await timeline.save(
@@ -522,32 +592,39 @@ class MarketplaceWorkflows:
                         order,
                         TimelineEventType.MARKETPLACE_ORDER_CREATED,
                         "Replacement Marketplace Order created through RBXCrate.",
-                        now + timedelta(microseconds=2),
+                        requeue_time + timedelta(microseconds=2),
                     )
                 )
-                if (
-                    automatic
-                    and settings.telegram_notifications_enabled
-                    and NotificationType.AUTOMATIC_REORDER in settings.notification_categories
+                if automatic and _notification_enabled(
+                    settings,
+                    NotificationType.AUTO_REQUEUE_COMPLETED,
                 ):
                     await NotificationRepository(session).save(
                         Notification(
                             client_order_id=order.id,
-                            notification_type=NotificationType.AUTOMATIC_REORDER,
-                            title="Auto Reorder",
-                            message=_format_automatic_reorder_notification(
-                                order.id,
-                                selected.rate,
+                            notification_type=NotificationType.AUTO_REQUEUE_COMPLETED,
+                            title="Auto Requeue Completed",
+                            message=_format_auto_requeue_completed_notification(
+                                customer.current_username,
+                                order,
+                                active.rbxcreate_order_id,
+                                replacement.rbxcreate_order_id,
                             ),
                             delivery_status=NotificationDeliveryStatus.PENDING,
                         )
                     )
                 if automatic:
                     logger.info(
-                        "auto_reorder_completed",
+                        "auto_requeue_completed",
                         extra={
                             "order_id": str(order.id),
+                            "marketplace_order_id": str(replacement.id),
+                            "external_order_id": replacement.rbxcreate_order_id,
+                            "customer": customer.current_username,
+                            "requested_robux": order.requested_robux,
+                            "previous_marketplace_order_id": str(active.id),
                             "new_marketplace_order_id": str(replacement.id),
+                            "requeue_attempt": attempt_number,
                         },
                     )
         except (DomainValidationError, DomainConflictError) as error:
@@ -592,6 +669,7 @@ class MarketplaceWorkflows:
                             now,
                         )
                     )
+                    await self._save_order_cancelled_notification(session, order)
         except (DomainValidationError, DomainConflictError) as error:
             raise ConflictError(str(error)) from error
 
@@ -618,8 +696,43 @@ class MarketplaceWorkflows:
                         now,
                     )
                 )
+                await self._save_order_cancelled_notification(session, order)
             return ActionResultDTO(message="Order cancelled.")
         return ActionResultDTO(message="Order cancelled.")
+
+    async def _save_order_cancelled_notification(
+        self,
+        session: AsyncSession,
+        order: ClientOrder,
+    ) -> None:
+        settings = await self._get_settings(session)
+        customer = await CustomerRepository(session).get(order.customer_id)
+        if customer is None:
+            raise NotFoundError("Customer")
+        logger.info(
+            "order_cancelled",
+            extra={
+                "order_id": str(order.id),
+                "customer": customer.current_username,
+                "requested_robux": order.requested_robux,
+            },
+        )
+        if not _notification_enabled(settings, NotificationType.ORDER_CANCELLED):
+            return
+        await NotificationRepository(session).save(
+            Notification(
+                client_order_id=order.id,
+                notification_type=NotificationType.ORDER_CANCELLED,
+                title="Order Cancelled",
+                message=(
+                    "<b>❌ Order Cancelled</b>\n\n"
+                    f"Customer: {escape(customer.current_username)}\n"
+                    f"Order: {order.requested_robux} R$\n"
+                    f"Order ID: <code>{order.id}</code>"
+                ),
+                delivery_status=NotificationDeliveryStatus.PENDING,
+            )
+        )
 
     async def _apply_synchronization(
         self,
@@ -688,13 +801,27 @@ class MarketplaceWorkflows:
             )
             await marketplace_orders.save(marketplace_order)
             await orders.save(order)
-            if (
-                marketplace_completed_now
-                and settings.telegram_notifications_enabled
-                and NotificationType.PURCHASE_COMPLETED in settings.notification_categories
-            ):
-                customer = await CustomerRepository(session).get(order.customer_id)
-                if customer is not None:
+            customer = await CustomerRepository(session).get(order.customer_id)
+            if customer is None:
+                raise NotFoundError("Customer")
+            remembered = await UserPlaceCacheRepository(session).get_by_username_for_update(
+                customer.current_username
+            )
+            if remembered is not None and remembered.place_id == order.current_place_id:
+                remembered.last_used_at = now
+                await UserPlaceCacheRepository(session).save(remembered)
+            if marketplace_completed_now:
+                logger.info(
+                    "purchase_completed",
+                    extra={
+                        "order_id": str(order.id),
+                        "marketplace_order_id": str(marketplace_order.id),
+                        "external_order_id": marketplace_order.rbxcreate_order_id,
+                        "customer": customer.current_username,
+                        "requested_robux": order.requested_robux,
+                    },
+                )
+                if _notification_enabled(settings, NotificationType.PURCHASE_COMPLETED):
                     await NotificationRepository(session).save(
                         Notification(
                             client_order_id=order.id,
@@ -843,11 +970,39 @@ def _format_purchase_completed_notification(
     )
 
 
-def _format_automatic_reorder_notification(order_id: UUID, rate: Decimal) -> str:
+def _notification_enabled(settings: SystemSettings, category: NotificationType) -> bool:
+    return settings.telegram_notifications_enabled and category in settings.notification_categories
+
+
+def _format_auto_requeue_started_notification(
+    username: str,
+    order: ClientOrder,
+    old_external_order_id: str,
+    delay_seconds: Decimal,
+    attempt_number: int,
+) -> str:
     return (
-        "<b>🔄 Auto Reorder</b>\n\n"
-        f"Order: #{order_id.hex[:8].upper()}\n\n"
-        "Previous marketplace order canceled\n"
-        "New marketplace order created\n\n"
-        f"Reason: stock detected at {rate.normalize()}$"
+        "<b>🔄 Auto Requeue Started</b>\n\n"
+        f"Customer: {escape(username)}\n"
+        f"Order: {order.requested_robux} R$\n"
+        "Old marketplace order:\n"
+        f"<code>{escape(old_external_order_id)}</code>\n"
+        f"Reason: order remained ACTIVE for {delay_seconds.normalize()}s\n"
+        f"Attempt: #{attempt_number}"
+    )
+
+
+def _format_auto_requeue_completed_notification(
+    username: str,
+    order: ClientOrder,
+    old_external_order_id: str,
+    new_external_order_id: str,
+) -> str:
+    return (
+        "<b>✅ Auto Requeue Completed</b>\n\n"
+        f"Customer: {escape(username)}\n"
+        f"Order: {order.requested_robux} R$\n"
+        f"Old order: <code>{escape(old_external_order_id)}</code>\n"
+        f"New order: <code>{escape(new_external_order_id)}</code>\n"
+        "Queue priority refreshed successfully."
     )

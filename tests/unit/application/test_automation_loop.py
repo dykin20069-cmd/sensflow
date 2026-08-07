@@ -42,6 +42,7 @@ def test_loop_synchronizes_respects_disabled_reorder_and_stops(
             maximum_purchase_rate=Decimal("2"),
             automatic_reorder_enabled=False,
             automatic_reorder_interval_seconds=3600,
+            auto_requeue_delay_seconds=Decimal("5"),
             marketplace_monitoring_interval_seconds=3600,
             synchronization_interval_seconds=3600,
             marketplace_commission=Decimal("0.1"),
@@ -110,12 +111,15 @@ def test_stock_notification_describes_selected_tier_and_client_count() -> None:
             max_instant_order=338,
             total_robux_amount=9071,
         ),
+        3,
     )
 
-    assert "New stock appeared" in message
+    assert "Suitable stock detected" in message
     assert "Rate: 4.3$" in message
+    assert "Accounts: 25" in message
     assert "Available: 9,071 R$" in message
     assert "Max instant: 338 R$" in message
+    assert "3 matching PreOrders" in message
     assert "Preferred stock detected" in message
 
 
@@ -130,12 +134,13 @@ def test_reorder_pass_uses_one_stock_plan_for_preorders_and_active_orders(
             maximum_purchase_rate=Decimal("4.5"),
             automatic_reorder_enabled=True,
             automatic_reorder_interval_seconds=Decimal("0.3"),
+            auto_requeue_delay_seconds=Decimal("5"),
             marketplace_monitoring_interval_seconds=30,
             synchronization_interval_seconds=30,
             marketplace_commission=Decimal("0.05"),
             usd_exchange_rate=Decimal("90"),
             telegram_notifications_enabled=True,
-            notification_categories=[NotificationType.AUTOMATIC_REORDER],
+            notification_categories=[NotificationType.STOCK_AVAILABLE],
             application_timezone="UTC",
         )
 
@@ -160,6 +165,7 @@ def test_reorder_pass_uses_one_stock_plan_for_preorders_and_active_orders(
             return_value=AutomationStockPlan(
                 order_ids=(preorder_id,),
                 stock=(stock,),
+                minimum_purchase_rate=Decimal("0"),
                 maximum_purchase_rate=Decimal("4.5"),
             )
         )
@@ -181,5 +187,14 @@ def test_reorder_pass_uses_one_stock_plan_for_preorders_and_active_orders(
         workflows.automatic_requeue.assert_awaited_once_with(active_id, (stock,))
         notifications.queue_once.assert_awaited_once()
         notifications.deliver_pending.assert_awaited_once()
+
+        await automation._run_stock_pass(
+            process_preorders=False,
+            process_active=True,
+        )
+
+        assert workflows.plan_automation.await_args.args[0] == ()
+        assert workflows.start_purchase.await_count == 1
+        assert workflows.automatic_requeue.await_count == 2
 
     asyncio.run(scenario())

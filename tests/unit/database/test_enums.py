@@ -41,6 +41,10 @@ from sensflow.infrastructure.database.enums import (
         (
             NotificationType,
             [
+                "stock_available",
+                "auto_requeue_started",
+                "auto_requeue_completed",
+                "auto_requeue_failed",
                 "purchase_completed",
                 "marketplace_error",
                 "synchronization_failed",

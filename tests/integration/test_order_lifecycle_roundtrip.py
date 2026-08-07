@@ -86,6 +86,7 @@ def test_complete_order_lifecycle_roundtrip(postgresql_url: str) -> None:
                         maximum_purchase_rate=Decimal("2"),
                         automatic_reorder_enabled=True,
                         automatic_reorder_interval_seconds=60,
+                        auto_requeue_delay_seconds=Decimal("5"),
                         marketplace_monitoring_interval_seconds=60,
                         synchronization_interval_seconds=60,
                         marketplace_commission=Decimal("0.10"),

@@ -216,6 +216,7 @@ class ClientOrder(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "usd_exchange_rate IS NULL OR usd_exchange_rate > 0",
             name="usd_exchange_rate_positive",
         ),
+        CheckConstraint("requeue_attempts >= 0", name="requeue_attempts_nonnegative"),
         CheckConstraint(
             "(current_status = 'completed' AND completed_at IS NOT NULL "
             "AND customer_receives IS NOT NULL AND marketplace_cost IS NOT NULL "
@@ -261,6 +262,19 @@ class ClientOrder(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     usd_exchange_rate: Mapped[Decimal | None] = mapped_column(Numeric(RATE_PRECISION, RATE_SCALE))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    automatic_requeue_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    last_requeue_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requeue_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
 
     customer: Mapped[Customer] = relationship(back_populates="client_orders")
     marketplace_orders: Mapped[list[MarketplaceOrder]] = relationship(
@@ -491,10 +505,17 @@ class SystemSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="reorder_interval_minimum",
         ),
         CheckConstraint(
+            "auto_requeue_delay_seconds >= 0.3",
+            name="auto_requeue_delay_minimum",
+        ),
+        CheckConstraint(
             "marketplace_monitoring_interval_seconds > 0", name="monitoring_interval_positive"
         ),
         CheckConstraint("synchronization_interval_seconds > 0", name="sync_interval_positive"),
-        CheckConstraint("marketplace_commission >= 0", name="marketplace_commission_nonnegative"),
+        CheckConstraint(
+            "marketplace_commission >= 0 AND marketplace_commission <= 1",
+            name="marketplace_commission_rate",
+        ),
         CheckConstraint("usd_exchange_rate > 0", name="usd_exchange_rate_positive"),
         CheckConstraint(
             "length(btrim(application_timezone)) > 0",
@@ -515,6 +536,12 @@ class SystemSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     automatic_reorder_interval_seconds: Mapped[Decimal] = mapped_column(
         Numeric(8, 3),
         nullable=False,
+    )
+    auto_requeue_delay_seconds: Mapped[Decimal] = mapped_column(
+        Numeric(8, 3),
+        nullable=False,
+        default=Decimal("5"),
+        server_default=text("5"),
     )
     marketplace_monitoring_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     synchronization_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)

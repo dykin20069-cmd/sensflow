@@ -189,6 +189,7 @@ def test_settings_and_statistics_services_only_read_persisted_projections() -> N
             maximum_purchase_rate=Decimal("1.25"),
             automatic_reorder_enabled=True,
             automatic_reorder_interval_seconds=300,
+            auto_requeue_delay_seconds=Decimal("5"),
             marketplace_monitoring_interval_seconds=30,
             synchronization_interval_seconds=30,
             marketplace_commission=Decimal("0.05"),

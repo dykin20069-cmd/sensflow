@@ -52,6 +52,7 @@ class OrderCallbackAction(StrEnum):
     DELETE_DRAFT = "delete"
     START_PURCHASE = "start"
     MANUAL_REORDER = "reorder"
+    TOGGLE_AUTO_REQUEUE = "auto_requeue"
     CANCEL = "cancel"
     REFRESH = "refresh"
     TIMELINE = "timeline"
@@ -66,6 +67,8 @@ class PlaceCallbackAction(StrEnum):
     CHOOSE_PUBLIC = "public"
     ENTER_MANUALLY = "manual"
     REFRESH = "refresh"
+    SEND_PREORDER = "preorder"
+    RETRY_STOCK = "retry_stock"
 
 
 class CustomerCallbackAction(StrEnum):

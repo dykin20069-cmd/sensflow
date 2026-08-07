@@ -4,17 +4,24 @@ import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 from aiogram.types import CallbackQuery, Message, User
 
-from sensflow.application.dto import CurrentStockDTO, MarketplaceStockDTO
+from sensflow.application.dto import (
+    CurrentStockDTO,
+    MarketplaceStockDTO,
+    OrderAction,
+    PageDTO,
+)
+from sensflow.domain.enums import ClientOrderStatus
 from sensflow.presentation.telegram.callbacks import (
     NavigationAction,
     NavigationCallback,
     NavigationTarget,
 )
-from sensflow.presentation.telegram.keyboards import navigation_keyboard
-from sensflow.presentation.telegram.rendering import render_current_stock
+from sensflow.presentation.telegram.keyboards import navigation_keyboard, order_details_keyboard
+from sensflow.presentation.telegram.rendering import render_current_stock, render_order_list
 from sensflow.presentation.telegram.routers.create_order import (
     back_from_place_id,
     begin_create_order,
@@ -74,14 +81,47 @@ def stock_snapshot() -> CurrentStockDTO:
 def test_stock_rendering_formats_rate_tiers_and_policy() -> None:
     screen = render_current_stock(stock_snapshot())
 
-    assert "🟢 4.2$ — 1,325 R$ available" in screen.text
-    assert "🟢 4.3$ — 9,071 R$ available" in screen.text
-    assert "🟡 4.5$ — 367 R$ available" in screen.text
-    assert "🔴 4.8$ — 100 R$ ignored" in screen.text
+    assert "🟢 4.2$ — preferred" in screen.text
+    assert "Accounts: 3\nAvailable: 1,325 R$\nMax instant: 427 R$" in screen.text
+    assert "🟢 4.3$ — preferred" in screen.text
+    assert "🟡 4.5$ — acceptable" in screen.text
+    assert "🔴 4.8$ — ignored" in screen.text
     assert "Total available within limit: 10,763 R$" in screen.text
     assert "Maximum instant order: 427 R$" in screen.text
     assert "Current limit: ≤ 4.5$" in screen.text
     assert "Updated: 14:54:12 UTC" in screen.text
+
+
+def test_active_and_preorder_screens_expose_direct_production_actions() -> None:
+    active_list = render_order_list(
+        PageDTO(items=(), page=1, page_size=10, total_items=0),
+        ClientOrderStatus.PURCHASING,
+    )
+    active_labels = [
+        button.text for row in active_list.reply_markup.inline_keyboard for button in row
+    ]
+    assert "No orders in this status." in active_list.text
+    assert "📦 View PreOrders" in active_labels
+
+    preorder_keyboard = order_details_keyboard(
+        uuid4(),
+        ClientOrderStatus.PREORDER,
+        (OrderAction.START_PURCHASE, OrderAction.FORCE_PURCHASE),
+    )
+    preorder_labels = [button.text for row in preorder_keyboard.inline_keyboard for button in row]
+    assert "📦 Retry Stock Check" in preorder_labels
+    assert "🚀 Force Create Marketplace Order" in preorder_labels
+
+    active_keyboard = order_details_keyboard(
+        uuid4(),
+        ClientOrderStatus.PURCHASING,
+        (OrderAction.MANUAL_REORDER, OrderAction.DISABLE_AUTO_REQUEUE),
+    )
+    active_action_labels = [
+        button.text for row in active_keyboard.inline_keyboard for button in row
+    ]
+    assert "🔄 Requeue Now" in active_action_labels
+    assert "⏸ Disable Auto Requeue" in active_action_labels
 
 
 def test_home_clears_state_and_close_deletes_the_screen() -> None:

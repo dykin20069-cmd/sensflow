@@ -29,6 +29,10 @@ _STRUCTURED_FIELDS = (
     "username",
     "place_id",
     "count",
+    "customer",
+    "available",
+    "requeue_attempt",
+    "reason",
 )
 
 
@@ -49,6 +53,7 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "logger": record.name,
             "message": redact_sensitive_text(record.getMessage()),
+            "event": redact_sensitive_text(record.getMessage()),
         }
 
         for field in _STRUCTURED_FIELDS:

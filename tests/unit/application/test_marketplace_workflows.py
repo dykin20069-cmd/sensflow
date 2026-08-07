@@ -2,13 +2,16 @@
 
 import asyncio
 from contextlib import AbstractAsyncContextManager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+import pytest
+
 import sensflow.application.marketplace_workflows as workflow_module
+from sensflow.application.errors import ConflictError
 from sensflow.application.marketplace_workflows import (
     MarketplaceWorkflows,
     _format_purchase_completed_notification,
@@ -165,10 +168,15 @@ def _wire(
             timeline.append(event)
             return event
 
+    class PlaceCache:
+        async def get_by_username_for_update(self, username: str) -> None:
+            return None
+
     settings = SystemSettings(
         maximum_purchase_rate=maximum_purchase_rate,
         automatic_reorder_enabled=True,
         automatic_reorder_interval_seconds=60,
+        auto_requeue_delay_seconds=Decimal("5"),
         marketplace_monitoring_interval_seconds=60,
         synchronization_interval_seconds=60,
         marketplace_commission=Decimal("0.10"),
@@ -188,6 +196,11 @@ def _wire(
         workflow_module, "MarketplaceOrderRepository", lambda session: Marketplace()
     )
     monkeypatch.setattr(workflow_module, "TimelineEventRepository", lambda session: Timeline())
+    monkeypatch.setattr(
+        workflow_module,
+        "UserPlaceCacheRepository",
+        lambda session: PlaceCache(),
+    )
     monkeypatch.setattr(
         workflow_module, "SystemSettingsRepository", lambda session: SettingsRepository()
     )
@@ -281,6 +294,7 @@ def test_manual_requeue_cancels_and_replaces_active_attempt_atomically(
         customer = _customer()
         order = _order(customer, ClientOrderStatus.PURCHASING)
         attempt = _attempt(order)
+        attempt.created_at = NOW - timedelta(seconds=5)
         state = _wire(monkeypatch, customer=customer, order=order, attempt=attempt)
         bridge = Bridge(
             stock=(MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),),
@@ -327,6 +341,7 @@ def test_automatic_requeue_checks_status_then_replaces_once(monkeypatch: Any) ->
         customer = _customer()
         order = _order(customer, ClientOrderStatus.PURCHASING)
         attempt = _attempt(order)
+        attempt.created_at = NOW - timedelta(seconds=5)
         state = _wire(monkeypatch, customer=customer, order=order, attempt=attempt)
         bridge = Bridge(
             sync_results=(
@@ -365,6 +380,70 @@ def test_automatic_requeue_checks_status_then_replaces_once(monkeypatch: Any) ->
         assert len(bridge.create_calls) == 1
         assert attempt.marketplace_status is MarketplaceOrderStatus.CANCELLED
         assert state.saved_marketplace[-1].marketplace_status is MarketplaceOrderStatus.ACTIVE
+
+    asyncio.run(scenario())
+
+
+def test_automatic_requeue_waits_for_configured_five_second_delay(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        attempt = _attempt(order)
+        attempt.created_at = NOW - timedelta(seconds=4)
+        _wire(monkeypatch, customer=customer, order=order, attempt=attempt)
+        bridge = Bridge(
+            stock=(MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),),
+        )
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        result = await workflows.automatic_requeue(order.id, bridge.stock)
+
+        assert result.message == "Automatic requeue delay has not elapsed."
+        assert bridge.sync_calls == 0
+        assert bridge.cancel_calls == []
+        assert bridge.create_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_manual_requeue_retry_never_creates_a_second_remote_order(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        attempt = _attempt(order)
+        _wire(monkeypatch, customer=customer, order=order, attempt=attempt)
+        bridge = Bridge(
+            stock=(MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),),
+            sync_results=(
+                MarketplaceSyncResult(
+                    attempt.rbxcreate_order_id,
+                    MarketplaceOrderStatus.ACTIVE,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                MarketplaceSyncResult(
+                    attempt.rbxcreate_order_id,
+                    MarketplaceOrderStatus.CANCELLED,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        )
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        await workflows.manual_requeue(order.id)
+        with pytest.raises(ConflictError, match="no active Marketplace Order"):
+            await workflows.manual_requeue(order.id)
+
+        assert len(bridge.create_calls) == 1
 
     asyncio.run(scenario())
 

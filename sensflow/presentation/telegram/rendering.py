@@ -3,6 +3,7 @@
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
@@ -36,6 +37,7 @@ from sensflow.presentation.telegram.keyboards import (
     customer_list_keyboard,
     main_menu_keyboard,
     navigation_keyboard,
+    no_stock_fallback_keyboard,
     order_details_keyboard,
     order_list_keyboard,
     orders_menu_keyboard,
@@ -98,16 +100,18 @@ def render_remembered_place(selection: PlaceIDSelectionDTO) -> Screen:
         return render_place_lookup_fallback("No remembered place is available.")
     return Screen(
         text=(
-            f"<b>Use remembered place for {escape_text(selection.username)}?</b>\n\n"
-            f"🎮 {escape_text(place.place_name)} "
-            f"(<code>{place.place_id}</code>)"
+            "<b>🎮 Remembered place found</b>\n\n"
+            f"Customer: {escape_text(selection.username)}\n"
+            "Saved place:\n"
+            f"[{escape_text(place.place_name)}]\n"
+            f"Place ID: <code>{place.place_id}</code>"
         ),
         reply_markup=remembered_place_keyboard(),
     )
 
 
 def render_public_places(selection: PlaceIDSelectionDTO) -> Screen:
-    lines = [f"<b>Found public places for {escape_text(selection.username)}</b>"]
+    lines = [f"<b>🎮 Public places for {escape_text(selection.username)}</b>"]
     for place in selection.public_places:
         lines.append(
             f"\n🎮 {escape_text(place.place_name)}\n⭐ {_compact_number(place.visits)} visits"
@@ -138,14 +142,19 @@ def render_current_stock(stock: CurrentStockDTO) -> Screen:
     for item in sorted(stock.items, key=lambda value: value.rate):
         if item.rate <= stock.preferred_rate:
             marker = "🟢"
-            details = f"{item.total_robux_amount:,} R$ available"
+            label = "preferred"
         elif item.rate <= stock.maximum_purchase_rate:
             marker = "🟡"
-            details = f"{item.total_robux_amount:,} R$ available"
+            label = "acceptable"
         else:
             marker = "🔴"
-            details = f"{item.total_robux_amount:,} R$ ignored"
-        lines.append(f"{marker} {format_decimal(item.rate, '$')} — {details}")
+            label = "ignored"
+        lines.append(
+            f"{marker} {format_decimal(item.rate, '$')} — {label}\n"
+            f"Accounts: {item.accounts_count:,}\n"
+            f"Available: {item.total_robux_amount:,} R$\n"
+            f"Max instant: {item.max_instant_order:,} R$"
+        )
     body = "\n".join(lines) or "No stock is currently available."
     allowed = tuple(item for item in stock.items if item.rate <= stock.maximum_purchase_rate)
     total_available = sum(item.total_robux_amount for item in allowed)
@@ -285,6 +294,8 @@ def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Scree
             f"🎁 Client: {format_robux(order.customer_receives)}\n"
             "Status: Purchasing\n"
             f"Marketplace rate limit: ≤ {format_decimal(order.marketplace_rate_limit, '$')}\n"
+            f"Auto Requeue: {format_boolean(order.automatic_requeue_enabled)}\n"
+            f"Requeue attempts: {order.requeue_attempts}\n"
             f"⏱ Created: {_format_card_datetime(order.created_at)}"
         )
     elif order.status is ClientOrderStatus.PREORDER:
@@ -350,16 +361,27 @@ def render_similar_order(order: OrderDetailDTO) -> Screen:
     )
 
 
-def render_draft_created(order: OrderDetailDTO) -> Screen:
-    """Render a newly created Draft with its immediately available actions."""
+def render_no_suitable_stock(requested_robux: int, maximum_rate: Decimal) -> Screen:
     return Screen(
         text=(
-            "<b>Draft Created</b>\n\n"
-            f"Order: <code>{order.id}</code>\n"
-            f"Username: {escape_text(order.customer_username)}\n"
+            "<b>⚠️ No suitable stock available</b>\n\n"
+            f"Requested: {format_robux(requested_robux)}\n"
+            f"Current limit: ≤ {format_decimal(maximum_rate, '$')}\n\n"
+            "What do you want to do?"
+        ),
+        reply_markup=no_stock_fallback_keyboard(),
+    )
+
+
+def render_preorder_created(order: OrderDetailDTO) -> Screen:
+    return Screen(
+        text=(
+            "<b>📦 PreOrder created</b>\n\n"
+            f"Customer: {escape_text(order.customer_username)}\n"
             f"Requested: {format_robux(order.requested_robux)}\n"
-            f"Place ID: <code>{order.current_place_id}</code>\n"
-            f"Status: {humanize(order.status)}"
+            f"Place ID: <code>{order.current_place_id}</code>\n\n"
+            "The bot will automatically monitor stock and purchase the order "
+            "when a suitable rate appears."
         ),
         reply_markup=order_details_keyboard(order.id, order.status, order.available_actions),
     )
@@ -456,13 +478,24 @@ def render_settings(settings: SettingsDTO | None) -> Screen:
             ", ".join(humanize(item) for item in settings.notification_categories) or "None"
         )
         body = (
-            f"Maximum purchase rate: {format_decimal(settings.maximum_purchase_rate)}\n"
-            f"Marketplace commission: {format_decimal(settings.marketplace_commission)}\n"
+            "<b>Maximum Purchase Rate</b>\n"
+            "Highest RBXCrate rate that will be purchased automatically.\n"
+            f"Current: {format_decimal(settings.maximum_purchase_rate, '$')}\n\n"
+            "<b>Marketplace Commission</b>\n"
+            "Decimal fee rate applied to marketplace cost (0.05 = 5%).\n"
+            f"Current: {format_decimal(settings.marketplace_commission)}\n\n"
             f"USD exchange rate: {format_decimal(settings.usd_exchange_rate)}\n"
             f"Automatic reorder: {format_boolean(settings.automatic_reorder_enabled)}\n"
-            "Reorder interval: "
-            f"{format_decimal(settings.automatic_reorder_interval_seconds, 's')}\n"
-            f"Monitoring interval: {settings.marketplace_monitoring_interval_seconds}s\n"
+            "\n<b>Automatic Reorder Interval</b>\n"
+            "How often active marketplace orders are checked for automatic requeue.\n"
+            f"Current: {format_decimal(settings.automatic_reorder_interval_seconds, 's')}\n"
+            "Minimum: 0.300s\n\n"
+            "<b>Auto Requeue Delay</b>\n"
+            "How long an ACTIVE order waits before its queue priority is refreshed.\n"
+            f"Current: {format_decimal(settings.auto_requeue_delay_seconds, 's')}\n\n"
+            "<b>Stock Monitoring Interval</b>\n"
+            "How often RBXCrate stock is refreshed for PreOrders.\n"
+            f"Current: {settings.marketplace_monitoring_interval_seconds}s\n"
             f"Synchronization interval: {settings.synchronization_interval_seconds}s\n"
             f"Telegram notifications: {format_boolean(settings.telegram_notifications_enabled)}\n"
             f"Notification categories: {categories}\n"

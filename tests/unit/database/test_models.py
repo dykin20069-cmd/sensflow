@@ -162,9 +162,12 @@ def test_core_check_constraints_are_present() -> None:
 
     assert "ck_customers_current_username_not_empty" in check_constraints
     assert "ck_client_orders_completed_order_fields" in check_constraints
+    assert "ck_client_orders_requeue_attempts_nonnegative" in check_constraints
     assert "ck_marketplace_orders_robux_amounts_consistent" in check_constraints
     assert "ck_notifications_delivery_timestamp_consistent" in check_constraints
     assert "ck_system_settings_reorder_interval_minimum" in check_constraints
+    assert "ck_system_settings_auto_requeue_delay_minimum" in check_constraints
+    assert "ck_system_settings_marketplace_commission_rate" in check_constraints
     assert "ck_system_settings_sync_interval_positive" in check_constraints
 
 

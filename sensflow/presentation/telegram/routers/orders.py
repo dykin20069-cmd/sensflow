@@ -331,6 +331,7 @@ async def receive_draft_place_id(
                 OrderCallbackAction.DELETE_DRAFT,
                 OrderCallbackAction.START_PURCHASE,
                 OrderCallbackAction.MANUAL_REORDER,
+                OrderCallbackAction.TOGGLE_AUTO_REQUEUE,
                 OrderCallbackAction.CANCEL,
                 OrderCallbackAction.REFRESH,
             }
@@ -355,6 +356,7 @@ async def handle_order_action(
         OrderCallbackAction.DELETE_DRAFT: orders.delete_draft,
         OrderCallbackAction.START_PURCHASE: orders.start_purchase,
         OrderCallbackAction.MANUAL_REORDER: orders.manual_reorder,
+        OrderCallbackAction.TOGGLE_AUTO_REQUEUE: orders.toggle_auto_requeue,
         OrderCallbackAction.CANCEL: orders.cancel_order,
         OrderCallbackAction.REFRESH: orders.refresh_order,
     }
