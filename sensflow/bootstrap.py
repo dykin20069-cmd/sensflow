@@ -60,6 +60,7 @@ def create_application(settings: Settings) -> Application:
         sessions,
         rbxcrate_bridge,
         settings_defaults=settings_defaults,
+        minimum_purchase_rate=settings.marketplace.minimum_purchase_rate,
     )
     automation = AutomationLoop(
         sessions,

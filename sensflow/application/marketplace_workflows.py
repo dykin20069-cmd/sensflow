@@ -80,12 +80,14 @@ class MarketplaceWorkflows:
         bridge: RbxcreateBridge,
         *,
         settings_defaults: SettingsDefaults | None = None,
+        minimum_purchase_rate: Decimal = Decimal("0"),
         finance_policy: FinancePolicy | None = None,
         clock: Clock = utc_now,
     ) -> None:
         self._sessions = sessions
         self._bridge = bridge
         self._settings_defaults = settings_defaults
+        self._minimum_purchase_rate = minimum_purchase_rate
         self._finance_policy = finance_policy or FinancePolicy()
         self._clock = clock
 
@@ -116,7 +118,12 @@ class MarketplaceWorkflows:
                     )
 
                 stock = await self._bridge.get_detailed_stock()
-                selected = _select_stock(stock, order)
+                selected = _select_stock(
+                    stock,
+                    requested_robux=order.requested_robux,
+                    minimum_purchase_rate=self._minimum_purchase_rate,
+                    maximum_purchase_rate=order.marketplace_rate_limit,
+                )
                 if selected is None:
                     if order.current_status is ClientOrderStatus.DRAFT:
                         enter_preorder(order)
@@ -451,15 +458,18 @@ class MarketplaceWorkflows:
 
 def _select_stock(
     stock: tuple[MarketplaceStock, ...],
-    order: ClientOrder,
+    *,
+    requested_robux: int,
+    minimum_purchase_rate: Decimal,
+    maximum_purchase_rate: Decimal,
 ) -> MarketplaceStock | None:
     suitable = (
         item
         for item in stock
-        if item.total_robux_amount >= order.requested_robux
-        and item.accounts_count > 0
-        and item.max_instant_order >= order.requested_robux
-        and item.rate <= order.marketplace_rate_limit
+        if item.rate >= minimum_purchase_rate
+        and item.rate <= maximum_purchase_rate
+        and item.max_instant_order >= requested_robux
+        and item.total_robux_amount >= requested_robux
     )
     return min(
         suitable,
