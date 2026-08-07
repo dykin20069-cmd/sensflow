@@ -18,15 +18,9 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     """Permit unverified Customers while preserving validated real Roblox IDs."""
-    op.drop_constraint(
-        "uq_customers_roblox_user_id",
-        "customers",
-        type_="unique",
-    )
-    op.drop_constraint(
-        "ck_customers_roblox_user_id_positive",
-        "customers",
-        type_="check",
+    op.execute("ALTER TABLE customers DROP CONSTRAINT IF EXISTS uq_customers_roblox_user_id")
+    op.execute(
+        "ALTER TABLE customers DROP CONSTRAINT IF EXISTS ck_customers_roblox_user_id_positive"
     )
     op.alter_column(
         "customers",
@@ -35,7 +29,7 @@ def upgrade() -> None:
         nullable=True,
     )
     op.create_check_constraint(
-        "ck_customers_roblox_user_id_positive",
+        op.f("ck_customers_roblox_user_id_positive"),
         "customers",
         "roblox_user_id IS NULL OR roblox_user_id > 0",
     )
@@ -45,6 +39,7 @@ def upgrade() -> None:
         ["roblox_user_id"],
         unique=True,
         postgresql_where=sa.text("roblox_user_id IS NOT NULL"),
+        if_not_exists=True,
     )
 
 
@@ -62,14 +57,9 @@ def downgrade() -> None:
         $$
         """
     )
-    op.drop_index(
-        "uq_customers_roblox_user_id_not_null",
-        table_name="customers",
-    )
-    op.drop_constraint(
-        "ck_customers_roblox_user_id_positive",
-        "customers",
-        type_="check",
+    op.execute("DROP INDEX IF EXISTS uq_customers_roblox_user_id_not_null")
+    op.execute(
+        "ALTER TABLE customers DROP CONSTRAINT IF EXISTS ck_customers_roblox_user_id_positive"
     )
     op.alter_column(
         "customers",
@@ -78,12 +68,12 @@ def downgrade() -> None:
         nullable=False,
     )
     op.create_check_constraint(
-        "ck_customers_roblox_user_id_positive",
+        op.f("ck_customers_roblox_user_id_positive"),
         "customers",
         "roblox_user_id > 0",
     )
     op.create_unique_constraint(
-        "uq_customers_roblox_user_id",
+        op.f("uq_customers_roblox_user_id"),
         "customers",
         ["roblox_user_id"],
     )

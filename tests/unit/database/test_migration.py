@@ -45,9 +45,15 @@ def test_initial_migration_renders_complete_upgrade_sql() -> None:
     ):
         assert f"CREATE TABLE {table_name}" in sql
     assert "CREATE UNIQUE INDEX uq_marketplace_orders_one_active_per_client_order" in sql
-    assert "CREATE UNIQUE INDEX uq_customers_roblox_user_id_not_null" in sql
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_roblox_user_id_not_null" in sql
     assert "WHERE roblox_user_id IS NOT NULL" in sql
     assert "ALTER TABLE customers ALTER COLUMN roblox_user_id DROP NOT NULL" in sql
+    assert "ALTER TABLE customers DROP CONSTRAINT IF EXISTS uq_customers_roblox_user_id" in sql
+    assert (
+        "ALTER TABLE customers "
+        "DROP CONSTRAINT IF EXISTS ck_customers_roblox_user_id_positive" in sql
+    )
+    assert "ck_customers_ck_customers_roblox_user_id_positive" not in sql
     assert "CREATE UNIQUE INDEX uq_system_settings_singleton" in sql
     assert sql.count("CREATE FUNCTION reject_protected_row_change()") == 1
     for trigger_name in (
