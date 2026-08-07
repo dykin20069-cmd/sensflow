@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sensflow.domain.enums import ClientOrderStatus, StatisticsPeriod
 
 SearchTerm = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+Username = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
 
 
 class Query(BaseModel):
@@ -39,6 +40,14 @@ class GetOrderQuery(Query):
     """Load one Client Order details screen."""
 
     order_id: UUID
+
+
+class FindSimilarOrderQuery(Query):
+    """Values defining a duplicate waiting or active Client Order."""
+
+    username: Username
+    requested_robux: int = Field(gt=0)
+    place_id: int = Field(gt=0, le=2**63 - 1)
 
 
 class SearchCustomersQuery(PaginatedQuery):

@@ -1,17 +1,19 @@
 """Focused tests for the manual Create Order Telegram conversation."""
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
-from aiogram.types import Message, User
+from aiogram.types import CallbackQuery, Message, User
 
 from sensflow.application.dto import ActionResultDTO, OrderAction, OrderDetailDTO
 from sensflow.domain.enums import ClientOrderStatus
 from sensflow.presentation.telegram.routers.create_order import (
+    create_duplicate_order,
     receive_manual_place_id,
     receive_requested_robux,
     receive_username,
@@ -48,6 +50,15 @@ def telegram_message(text: str) -> MagicMock:
     return message
 
 
+def telegram_callback() -> MagicMock:
+    callback = MagicMock(spec=CallbackQuery)
+    callback.from_user = User(id=42, is_bot=False, first_name="Operator")
+    callback.answer = AsyncMock()
+    callback.message = MagicMock(spec=Message)
+    callback.message.edit_text = AsyncMock()
+    return callback
+
+
 def draft_details(order_id: UUID) -> OrderDetailDTO:
     return OrderDetailDTO(
         id=order_id,
@@ -79,6 +90,7 @@ def test_manual_create_order_conversation_creates_and_renders_draft() -> None:
         orders = MagicMock()
         order_id = uuid4()
         orders.prepare_create_order = AsyncMock()
+        orders.find_similar_order = AsyncMock(return_value=None)
         orders.create_order = AsyncMock(
             return_value=ActionResultDTO(
                 message=f"Draft order {order_id} was created.",
@@ -140,6 +152,7 @@ def test_invalid_manual_place_id_keeps_conversation_open(invalid_place_id: str) 
         state.current = CreateOrderStates.manual_place_id
         orders = MagicMock()
         orders.create_order = AsyncMock()
+        orders.find_similar_order = AsyncMock(return_value=None)
         message = telegram_message(invalid_place_id)
 
         await receive_manual_place_id(
@@ -154,5 +167,55 @@ def test_invalid_manual_place_id_keeps_conversation_open(invalid_place_id: str) 
         assert message.answer.await_args.args[0] == (
             "Invalid Place ID. Send a positive numeric Roblox Place ID."
         )
+
+    asyncio.run(scenario())
+
+
+def test_similar_order_requires_explicit_reuse_or_duplicate_choice() -> None:
+    async def scenario() -> None:
+        state = MemoryState()
+        state.data = {"username": "viki_show2010435", "requested_robux": 100}
+        state.current = CreateOrderStates.manual_place_id
+        existing = replace(
+            draft_details(uuid4()),
+            status=ClientOrderStatus.PREORDER,
+        )
+        orders = MagicMock()
+        orders.find_similar_order = AsyncMock(return_value=existing)
+        orders.create_order = AsyncMock()
+        message = telegram_message("1234567890")
+
+        await receive_manual_place_id(message, state, orders)  # type: ignore[arg-type]
+
+        assert state.current == CreateOrderStates.duplicate_confirmation
+        orders.create_order.assert_not_awaited()
+        assert "Similar order already exists" in message.answer.await_args.args[0]
+
+    asyncio.run(scenario())
+
+
+def test_create_another_sets_explicit_duplicate_override() -> None:
+    async def scenario() -> None:
+        state = MemoryState()
+        state.data = {
+            "username": "viki_show2010435",
+            "requested_robux": 100,
+            "place_id": 1_234_567_890,
+        }
+        state.current = CreateOrderStates.duplicate_confirmation
+        order_id = uuid4()
+        orders = MagicMock()
+        orders.create_order = AsyncMock(
+            return_value=ActionResultDTO(message="created", order_id=order_id)
+        )
+        orders.get_order = AsyncMock(return_value=draft_details(order_id))
+        callback = telegram_callback()
+
+        await create_duplicate_order(callback, state, orders)  # type: ignore[arg-type]
+
+        command = orders.create_order.await_args.args[0]
+        assert command.allow_duplicate is True
+        assert state.cleared is True
+        assert "Draft Created" in callback.message.edit_text.await_args.args[0]
 
     asyncio.run(scenario())

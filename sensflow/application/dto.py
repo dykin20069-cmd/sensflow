@@ -9,6 +9,7 @@ from uuid import UUID
 
 from sensflow.domain.enums import (
     ClientOrderStatus,
+    MarketplaceOrderStatus,
     NotificationType,
     StatisticsPeriod,
     TimelineEventType,
@@ -113,7 +114,29 @@ class OrderDetailDTO:
     completed_at: datetime | None
     timeline: tuple[TimelineEventDTO, ...]
     marketplace_rate: Decimal | None = None
+    marketplace_status: MarketplaceOrderStatus | None = None
+    marketplace_order_reference: str | None = None
     available_actions: tuple[OrderAction, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class MarketplaceStockDTO:
+    """One RBXCrate rate tier safe for operator presentation."""
+
+    rate: Decimal
+    accounts_count: int
+    max_instant_order: int
+    total_robux_amount: int
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentStockDTO:
+    """Current typed stock snapshot and the rate policy applied to it."""
+
+    items: tuple[MarketplaceStockDTO, ...]
+    maximum_purchase_rate: Decimal
+    preferred_rate: Decimal
+    updated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

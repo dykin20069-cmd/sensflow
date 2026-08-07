@@ -2,8 +2,12 @@
 
 import asyncio
 from decimal import Decimal
+from uuid import uuid4
 
-from sensflow.application.marketplace_workflows import _select_stock
+from sensflow.application.marketplace_workflows import (
+    _select_preorders_maximum_clients,
+    _select_stock,
+)
 from sensflow.application.rbxcreate_bridge import MarketplaceStock, RbxcreateBridge
 from sensflow.integrations.rbxcreate.models import DetailedStockItem
 
@@ -105,3 +109,18 @@ def test_equal_rate_uses_largest_available_stock() -> None:
 
     assert selected is not None
     assert selected.total_robux_amount == 9000
+
+
+def test_maximum_clients_strategy_fits_smallest_complete_preorders_first() -> None:
+    order_ids = tuple(uuid4() for _ in range(4))
+    stock = (_stock("4.2", total_robux_amount=1000, max_instant_order=1000),)
+
+    selected, selected_stock = _select_preorders_maximum_clients(
+        tuple(zip(order_ids, (229, 231, 514, 950), strict=True)),
+        stock,
+        minimum_purchase_rate=Decimal("0"),
+        maximum_purchase_rate=Decimal("4.5"),
+    )
+
+    assert selected == order_ids[:3]
+    assert selected_stock is stock[0]

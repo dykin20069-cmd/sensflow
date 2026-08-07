@@ -8,7 +8,8 @@ from typing import Any
 from uuid import uuid4
 
 import sensflow.application.automation_loop as loop_module
-from sensflow.application.automation_loop import AutomationLoop
+from sensflow.application.automation_loop import AutomationLoop, _stock_appeared_message
+from sensflow.application.rbxcreate_bridge import MarketplaceStock
 from sensflow.infrastructure.database.models import SystemSettings
 
 
@@ -96,3 +97,21 @@ def test_loop_synchronizes_respects_disabled_reorder_and_stops(
         assert automation._task is None
 
     asyncio.run(scenario())
+
+
+def test_stock_notification_describes_selected_tier_and_client_count() -> None:
+    message = _stock_appeared_message(
+        MarketplaceStock(
+            rate=Decimal("4.3"),
+            accounts_count=25,
+            max_instant_order=338,
+            total_robux_amount=9071,
+        ),
+        3,
+    )
+
+    assert "Stock appeared" in message
+    assert "Rate: 4.3$" in message
+    assert "Available: 9071 R$" in message
+    assert "Largest instant order: 338 R$" in message
+    assert "Requeueing 3 PreOrders" in message

@@ -7,6 +7,7 @@ class CreateOrderStates(StatesGroup):
     username = State()
     requested_robux = State()
     manual_place_id = State()
+    duplicate_confirmation = State()
 
 
 class OrderSearchStates(StatesGroup):

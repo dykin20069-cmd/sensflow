@@ -162,6 +162,17 @@ def test_client_order_repository_exposes_queries_and_deletion_without_rules() ->
         assert "client_orders.current_status = 'draft'" in list_sql
         assert "LIMIT 10 OFFSET 10" in list_sql
 
+        await repository.find_similar_active(
+            username="Builder",
+            place_id=123,
+            requested_robux=100,
+        )
+        duplicate_sql = sql(session.scalar.await_args.args[0])
+        assert "lower(customers.current_username) = 'builder'" in duplicate_sql
+        assert "client_orders.current_place_id = 123" in duplicate_sql
+        assert "client_orders.requested_robux = 100" in duplicate_sql
+        assert "IN ('preorder', 'purchasing')" in duplicate_sql
+
         await repository.search("Builder")
         search_sql = sql(session.scalars.await_args.args[0])
         assert "JOIN customers" in search_sql

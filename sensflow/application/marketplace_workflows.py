@@ -2,19 +2,18 @@
 
 import logging
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from html import escape
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from sensflow.application.dto import ActionResultDTO
+from sensflow.application.dto import ActionResultDTO, CurrentStockDTO, MarketplaceStockDTO
 from sensflow.application.errors import (
     ConflictError,
-    MarketplaceCancellationUnsupportedError,
     MarketplaceIntegrationError,
     NotFoundError,
 )
@@ -23,7 +22,13 @@ from sensflow.application.rbxcreate_bridge import (
     MarketplaceSyncResult,
     RbxcreateBridge,
 )
-from sensflow.domain.enums import ClientOrderStatus, MarketplaceOrderStatus, TimelineEventType
+from sensflow.domain.enums import (
+    ClientOrderStatus,
+    MarketplaceOrderStatus,
+    NotificationDeliveryStatus,
+    NotificationType,
+    TimelineEventType,
+)
 from sensflow.domain.errors import DomainConflictError, DomainValidationError
 from sensflow.domain.finance.service import (
     calculate_customer_receives,
@@ -47,11 +52,17 @@ from sensflow.domain.order.service import (
 from sensflow.domain.order.timeline import create_timeline_event
 from sensflow.domain.settings.service import SettingsDefaults, create_settings
 from sensflow.infrastructure.database.base import utc_now
-from sensflow.infrastructure.database.models import ClientOrder, MarketplaceOrder, SystemSettings
+from sensflow.infrastructure.database.models import (
+    ClientOrder,
+    MarketplaceOrder,
+    Notification,
+    SystemSettings,
+)
 from sensflow.repositories import (
     ClientOrderRepository,
     CustomerRepository,
     MarketplaceOrderRepository,
+    NotificationRepository,
     SystemSettingsRepository,
     TimelineEventRepository,
 )
@@ -90,6 +101,41 @@ class MarketplaceWorkflows:
         self._minimum_purchase_rate = minimum_purchase_rate
         self._finance_policy = finance_policy or FinancePolicy()
         self._clock = clock
+
+    async def get_current_stock(self) -> CurrentStockDTO:
+        """Return the live RBXCrate stock with the currently persisted rate limit."""
+        async with self._sessions.begin() as session:
+            settings = await self._get_settings(session)
+            stock = await self._bridge.get_detailed_stock()
+        return CurrentStockDTO(
+            items=tuple(
+                MarketplaceStockDTO(
+                    rate=item.rate,
+                    accounts_count=item.accounts_count,
+                    max_instant_order=item.max_instant_order,
+                    total_robux_amount=item.total_robux_amount,
+                )
+                for item in stock
+            ),
+            maximum_purchase_rate=settings.maximum_purchase_rate,
+            preferred_rate=Decimal("4.3"),
+            updated_at=self._clock(),
+        )
+
+    async def plan_preorders(
+        self,
+        candidates: tuple[tuple[UUID, int], ...],
+    ) -> tuple[tuple[UUID, ...], MarketplaceStock | None]:
+        """Plan a maximum-clients pass from one consistent stock snapshot."""
+        async with self._sessions.begin() as session:
+            settings = await self._get_settings(session)
+            stock = await self._bridge.get_detailed_stock()
+        return _select_preorders_maximum_clients(
+            candidates,
+            stock,
+            minimum_purchase_rate=self._minimum_purchase_rate,
+            maximum_purchase_rate=settings.maximum_purchase_rate,
+        )
 
     async def start_purchase(self, order_id: UUID) -> ActionResultDTO:
         """Select suitable stock and either start an attempt or retain a PreOrder."""
@@ -296,6 +342,100 @@ class MarketplaceWorkflows:
             marketplace_order_id = active.id
         return await self.synchronize_marketplace_order(marketplace_order_id)
 
+    async def manual_requeue(self, order_id: UUID) -> ActionResultDTO:
+        """Replace one untouched active attempt while holding its Client Order lock."""
+        try:
+            async with self._sessions.begin() as session:
+                orders = ClientOrderRepository(session)
+                order = await orders.get_for_update(order_id)
+                if order is None:
+                    raise NotFoundError("Client Order")
+                if order.current_status is not ClientOrderStatus.PURCHASING:
+                    raise DomainConflictError("Only an active purchase can be requeued")
+
+                marketplace_orders = MarketplaceOrderRepository(session)
+                active = await marketplace_orders.get_active_for_client_order_for_update(order.id)
+                if active is None:
+                    raise DomainConflictError("Purchasing order has no active Marketplace Order")
+                if active.purchased_robux != 0:
+                    raise DomainConflictError(
+                        "An order with purchased Robux must be synchronized before requeueing"
+                    )
+
+                settings = await self._get_settings(session)
+                stock = await self._bridge.get_detailed_stock()
+                selected = _select_stock(
+                    stock,
+                    requested_robux=order.requested_robux,
+                    minimum_purchase_rate=self._minimum_purchase_rate,
+                    maximum_purchase_rate=settings.maximum_purchase_rate,
+                )
+                if selected is None:
+                    return ActionResultDTO(
+                        message="No suitable stock is available; the active order was retained."
+                    )
+
+                customer = await CustomerRepository(session).get(order.customer_id)
+                if customer is None:
+                    raise NotFoundError("Customer")
+
+                await self._bridge.cancel_order(active.rbxcreate_order_id)
+                now = self._clock()
+                cancel_marketplace_order(
+                    active,
+                    purchased_robux=active.purchased_robux,
+                    remaining_robux=active.remaining_robux,
+                    now=now,
+                )
+                return_to_preorder(order)
+                await marketplace_orders.save(active)
+
+                order.marketplace_rate_limit = settings.maximum_purchase_rate
+                start_purchasing(order)
+                external = await self._bridge.create_gamepass_order(
+                    roblox_username=customer.current_username,
+                    order_id=f"{order.id}:{active.id}",
+                    robux_amount=order.requested_robux,
+                    place_id=order.current_place_id,
+                )
+                if external.status is not MarketplaceOrderStatus.ACTIVE:
+                    raise MarketplaceIntegrationError(
+                        "RBXCrate returned a terminal status while requeueing the order"
+                    )
+                replacement = create_marketplace_order(
+                    order,
+                    MarketplaceOrderResult(
+                        external_order_id=external.external_order_id,
+                        purchase_rate=selected.rate,
+                        requested_robux=order.requested_robux,
+                    ),
+                    active_order_exists=False,
+                )
+                await orders.save(order)
+                await marketplace_orders.save(replacement)
+                timeline = TimelineEventRepository(session)
+                await timeline.save(
+                    create_timeline_event(
+                        order,
+                        TimelineEventType.MANUAL_REORDER,
+                        "Operator cancelled the active attempt and requeued the order.",
+                        now,
+                    )
+                )
+                await timeline.save(
+                    create_timeline_event(
+                        order,
+                        TimelineEventType.MARKETPLACE_ORDER_CREATED,
+                        "Replacement Marketplace Order created through RBXCrate.",
+                        now + timedelta(microseconds=1),
+                    )
+                )
+        except (DomainValidationError, DomainConflictError) as error:
+            raise ConflictError(str(error)) from error
+        except IntegrityError as error:
+            raise ConflictError("The order changed concurrently; please refresh") from error
+        return ActionResultDTO(message="Active Marketplace Order was requeued.")
+
     async def cancel_active_purchase(self, order_id: UUID) -> ActionResultDTO:
         """Cancel an active external attempt, or the Client Order when none exists."""
         try:
@@ -330,9 +470,29 @@ class MarketplaceWorkflows:
             raise ConflictError(str(error)) from error
 
         if active_id is not None and external_order_id is not None:
-            with suppress(MarketplaceCancellationUnsupportedError):
-                await self._bridge.cancel_order(external_order_id)
-            return await self.synchronize_marketplace_order(active_id)
+            await self._bridge.cancel_order(external_order_id)
+            await self.synchronize_marketplace_order(active_id)
+            async with self._sessions.begin() as session:
+                orders = ClientOrderRepository(session)
+                order = await orders.get_for_update(order_id)
+                if order is None:
+                    raise NotFoundError("Client Order")
+                if order.current_status is not ClientOrderStatus.PREORDER:
+                    raise ConflictError(
+                        "RBXCrate has not confirmed cancellation; the Client Order remains active"
+                    )
+                now = self._clock()
+                cancel_order(order, now)
+                await orders.save(order)
+                await TimelineEventRepository(session).save(
+                    create_timeline_event(
+                        order,
+                        TimelineEventType.ORDER_CANCELLED,
+                        "Client Order cancelled after RBXCrate confirmed cancellation.",
+                        now,
+                    )
+                )
+            return ActionResultDTO(message="Order cancelled.")
         return ActionResultDTO(message="Order cancelled.")
 
     async def _apply_synchronization(
@@ -402,6 +562,28 @@ class MarketplaceWorkflows:
             )
             await marketplace_orders.save(marketplace_order)
             await orders.save(order)
+            if (
+                marketplace_completed_now
+                and settings.telegram_notifications_enabled
+                and NotificationType.PURCHASE_COMPLETED in settings.notification_categories
+            ):
+                customer = await CustomerRepository(session).get(order.customer_id)
+                if customer is not None:
+                    await NotificationRepository(session).save(
+                        Notification(
+                            client_order_id=order.id,
+                            notification_type=NotificationType.PURCHASE_COMPLETED,
+                            title="Purchase Completed",
+                            message=_format_purchase_completed_notification(
+                                order,
+                                marketplace_order,
+                                customer.current_username,
+                                settings.marketplace_commission,
+                                settings.usd_exchange_rate,
+                            ),
+                            delivery_status=NotificationDeliveryStatus.PENDING,
+                        )
+                    )
             if marketplace_completed_now:
                 await timeline.save(
                     create_timeline_event(
@@ -478,3 +660,74 @@ def _select_stock(
         key=lambda item: (item.rate, -item.total_robux_amount),
     )
     return ordered[0] if ordered else None
+
+
+def _select_preorders_maximum_clients(
+    candidates: tuple[tuple[UUID, int], ...],
+    stock: tuple[MarketplaceStock, ...],
+    *,
+    minimum_purchase_rate: Decimal,
+    maximum_purchase_rate: Decimal,
+) -> tuple[tuple[UUID, ...], MarketplaceStock | None]:
+    """Greedily fit the smallest complete orders into eligible stock tiers."""
+    remaining = [item.total_robux_amount for item in stock]
+    selected_ids: list[UUID] = []
+    notification_stock: MarketplaceStock | None = None
+    for order_id, requested_robux in sorted(candidates, key=lambda item: (item[1], item[0])):
+        eligible_indexes = [
+            index
+            for index, item in enumerate(stock)
+            if item.rate >= minimum_purchase_rate
+            and item.rate <= maximum_purchase_rate
+            and item.max_instant_order >= requested_robux
+            and remaining[index] >= requested_robux
+        ]
+        if not eligible_indexes:
+            continue
+        selected_index = min(
+            eligible_indexes,
+            key=lambda index: (stock[index].rate, -remaining[index]),
+        )
+        remaining[selected_index] -= requested_robux
+        selected_ids.append(order_id)
+        if notification_stock is None:
+            notification_stock = stock[selected_index]
+    return tuple(selected_ids), notification_stock
+
+
+def _format_purchase_completed_notification(
+    order: ClientOrder,
+    marketplace_order: MarketplaceOrder,
+    username: str,
+    commission_rate: Decimal,
+    usd_exchange_rate: Decimal,
+) -> str:
+    """Format the documented rate-based operator cost breakdown."""
+    marketplace_cost = (
+        Decimal(marketplace_order.purchased_robux)
+        * marketplace_order.purchase_rate
+        / Decimal("1000")
+    )
+    financials = calculate_financial_snapshot(
+        marketplace_cost=marketplace_cost,
+        commission_rate=commission_rate,
+        usd_exchange_rate=usd_exchange_rate,
+        money_quantum=Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    commission_percent = commission_rate * Decimal("100")
+    return (
+        "<b>✅ Purchase Completed</b>\n"
+        f"👤 Customer: {escape(username)}\n"
+        f"🎮 Place ID: <code>{order.current_place_id}</code>\n"
+        f"💰 Purchased: {marketplace_order.purchased_robux} R$\n"
+        f"📦 Client receives: {order.customer_receives} R$\n"
+        f"📉 Rate: {marketplace_order.purchase_rate.normalize()}$\n"
+        f"💵 Marketplace cost: ${financials.marketplace_cost:.2f}\n"
+        f"➕ Fee {commission_percent.normalize()}%: "  # noqa: RUF001
+        f"${financials.marketplace_commission:.2f}\n"
+        f"🧾 Total paid: ${financials.final_cost_usd:.2f}\n"
+        f"🇷🇺 Total RUB: {financials.final_cost_local_currency:.2f} ₽\n"
+        "🆔 Marketplace order: "
+        f"<code>{escape(marketplace_order.rbxcreate_order_id)}</code>"
+    )

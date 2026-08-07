@@ -1,12 +1,14 @@
 """Pure screen renderers and Telegram message presentation mechanics."""
 
 from dataclasses import dataclass
+from datetime import UTC
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from sensflow.application.dto import (
     ActionResultDTO,
+    CurrentStockDTO,
     CustomerDetailDTO,
     OrderDetailDTO,
     OrderStatusCountsDTO,
@@ -27,6 +29,7 @@ from sensflow.presentation.telegram.formatting import (
     humanize,
 )
 from sensflow.presentation.telegram.keyboards import (
+    current_stock_keyboard,
     customer_details_keyboard,
     customer_list_keyboard,
     main_menu_keyboard,
@@ -35,6 +38,7 @@ from sensflow.presentation.telegram.keyboards import (
     order_list_keyboard,
     orders_menu_keyboard,
     settings_keyboard,
+    similar_order_keyboard,
     statistics_keyboard,
     system_status_keyboard,
 )
@@ -66,8 +70,43 @@ async def show_screen(event: Message | CallbackQuery, screen: Screen) -> None:
 
 def render_main_menu() -> Screen:
     return Screen(
-        text="<b>SensFlow</b>\n\nChoose an area:",
+        text="<b>🏠 SensFlow Dashboard</b>\n\nChoose an action:",
         reply_markup=main_menu_keyboard(),
+    )
+
+
+def render_current_stock(stock: CurrentStockDTO) -> Screen:
+    lines: list[str] = []
+    for item in sorted(stock.items, key=lambda value: value.rate):
+        if item.rate <= stock.preferred_rate:
+            marker = "🟢"
+            details = (
+                f"{item.accounts_count} "
+                f"{'account' if item.accounts_count == 1 else 'accounts'} — "
+                f"{item.total_robux_amount} R$"
+            )
+        elif item.rate <= stock.maximum_purchase_rate:
+            marker = "🟡"
+            details = (
+                f"{item.accounts_count} "
+                f"{'account' if item.accounts_count == 1 else 'accounts'} — "
+                f"{item.total_robux_amount} R$"
+            )
+        else:
+            marker = "🔴"
+            details = "ignored"
+        lines.append(f"{marker} {format_decimal(item.rate, '$')} — {details}")
+    body = "\n".join(lines) or "No stock is currently available."
+    updated = stock.updated_at.astimezone(UTC).strftime("%H:%M:%S UTC")
+    return Screen(
+        text=(
+            "<b>📊 Current RBXCrate Stock</b>\n\n"
+            f"{body}\n\n"
+            f"Current limit: ≤ {format_decimal(stock.maximum_purchase_rate, '$')}\n"
+            f"Preferred: ≤ {format_decimal(stock.preferred_rate, '$')}\n"
+            f"Updated: {updated}"
+        ),
+        reply_markup=current_stock_keyboard(),
     )
 
 
@@ -110,15 +149,19 @@ def render_order_list(
 ) -> Screen:
     if page.items:
         lines = [
-            f"• {escape_text(item.customer_username)} — {format_robux(item.requested_robux)}"
-            for item in page.items
+            f"{index}. {escape_text(item.customer_username)} — {format_robux(item.requested_robux)}"
+            for index, item in enumerate(page.items, start=1 + (page.page - 1) * page.page_size)
         ]
         body = "\n".join(lines)
     else:
         body = "No orders in this status."
     pagination = Pagination(page.page, page.page_size, page.total_items)
+    title = {
+        ClientOrderStatus.PURCHASING: "📦 Active Orders",
+        ClientOrderStatus.PREORDER: "⏳ PreOrders",
+    }.get(status, f"{humanize(status)} Orders")
     return Screen(
-        text=f"<b>{humanize(status)} Orders</b>\n\n{body}",
+        text=f"<b>{title}</b>\n\n{body}",
         reply_markup=order_list_keyboard(page.items, pagination, status.value),
     )
 
@@ -174,7 +217,50 @@ def render_order_details(order: OrderDetailDTO) -> Screen:
     )
     return Screen(
         text=text,
-        reply_markup=order_details_keyboard(order.id, order.available_actions),
+        reply_markup=order_details_keyboard(order.id, order.status, order.available_actions),
+    )
+
+
+def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Screen:
+    if order.status is ClientOrderStatus.PURCHASING:
+        title = "📦 Active Order"
+        marketplace = humanize(order.marketplace_status) if order.marketplace_status else "Active"
+        status_line = f"Marketplace status: {marketplace}"
+    elif order.status is ClientOrderStatus.PREORDER:
+        title = "⏳ PreOrder"
+        status_line = f"Waiting for stock ≤ {format_decimal(order.marketplace_rate_limit, '$')}"
+    else:
+        title = f"📋 {humanize(order.status)} Order"
+        status_line = f"Status: {humanize(order.status)}"
+    reference = (
+        ""
+        if order.marketplace_order_reference is None
+        else f"\nMarketplace order: <code>{escape_text(order.marketplace_order_reference)}</code>"
+    )
+    notice_text = "" if notice is None else f"\n\n{escape_text(notice)}"
+    return Screen(
+        text=(
+            f"<b>{title}</b>\n\n"
+            f"👤 {escape_text(order.customer_username)}\n"
+            f"💰 {format_robux(order.requested_robux)}\n"
+            f"🎮 <code>{order.current_place_id}</code>\n"
+            f"{status_line}\n"
+            f"Max rate: {format_decimal(order.marketplace_rate_limit, '$')}"
+            f"{reference}{notice_text}"
+        ),
+        reply_markup=order_details_keyboard(order.id, order.status, order.available_actions),
+    )
+
+
+def render_similar_order(order: OrderDetailDTO) -> Screen:
+    return Screen(
+        text=(
+            "<b>⚠️ Similar order already exists</b>\n\n"
+            f"Customer: {escape_text(order.customer_username)}\n"
+            f"Amount: {format_robux(order.requested_robux)}\n"
+            f"Status: {humanize(order.status)}"
+        ),
+        reply_markup=similar_order_keyboard(order.id),
     )
 
 
@@ -189,7 +275,7 @@ def render_draft_created(order: OrderDetailDTO) -> Screen:
             f"Place ID: <code>{order.current_place_id}</code>\n"
             f"Status: {humanize(order.status)}"
         ),
-        reply_markup=order_details_keyboard(order.id, order.available_actions),
+        reply_markup=order_details_keyboard(order.id, order.status, order.available_actions),
     )
 
 
@@ -210,7 +296,7 @@ def render_customer_search_prompt() -> Screen:
             "<b>Customers</b>\n\nSend a current username to search, "
             "or send <code>*</code> to list Customers."
         ),
-        reply_markup=navigation_keyboard(),
+        reply_markup=navigation_keyboard(back_target=NavigationTarget.MAIN),
     )
 
 

@@ -15,6 +15,7 @@ from sensflow.application.commands import (
 )
 from sensflow.application.dto import (
     ActionResultDTO,
+    CurrentStockDTO,
     CustomerDetailDTO,
     CustomerSummaryDTO,
     OrderDetailDTO,
@@ -28,6 +29,7 @@ from sensflow.application.dto import (
     TimelineEventDTO,
 )
 from sensflow.application.queries import (
+    FindSimilarOrderQuery,
     GetCustomerQuery,
     GetOrderQuery,
     GetStatisticsQuery,
@@ -47,6 +49,10 @@ class OrderUseCases(Protocol):
     async def search_orders(self, query: SearchOrdersQuery) -> PageDTO[OrderSummaryDTO]: ...
 
     async def get_order(self, query: GetOrderQuery) -> OrderDetailDTO: ...
+
+    async def find_similar_order(self, query: FindSimilarOrderQuery) -> OrderDetailDTO | None: ...
+
+    async def get_current_stock(self) -> CurrentStockDTO: ...
 
     async def get_timeline(self, query: GetOrderQuery) -> tuple[TimelineEventDTO, ...]: ...
 

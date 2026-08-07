@@ -7,7 +7,9 @@ from contextlib import suppress
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from sensflow.application.marketplace_workflows import MarketplaceWorkflows
-from sensflow.domain.enums import ClientOrderStatus, MarketplaceOrderStatus
+from sensflow.application.notifications import NotificationService
+from sensflow.application.rbxcreate_bridge import MarketplaceStock
+from sensflow.domain.enums import ClientOrderStatus, MarketplaceOrderStatus, NotificationType
 from sensflow.domain.settings.service import SettingsDefaults, create_settings
 from sensflow.infrastructure.database.models import SystemSettings
 from sensflow.repositories import (
@@ -30,10 +32,12 @@ class AutomationLoop:
         workflows: MarketplaceWorkflows,
         *,
         settings_defaults: SettingsDefaults | None = None,
+        notifications: NotificationService | None = None,
     ) -> None:
         self._sessions = sessions
         self._workflows = workflows
         self._settings_defaults = settings_defaults
+        self._notifications = notifications
         self._shutdown = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
@@ -81,16 +85,34 @@ class AutomationLoop:
                     "marketplace_synchronization_failed",
                     extra={"marketplace_order_id": str(attempt_id)},
                 )
+        if self._notifications is not None:
+            await self._notifications.deliver_pending()
         return len(active_attempts)
 
     async def run_reorder_pass(self) -> None:
-        """Attempt each waiting order sequentially and isolate failures."""
+        """Attempt the maximum number of complete waiting orders from current stock."""
         async with self._sessions() as session:
             orders = await ClientOrderRepository(session).list_by_status(
                 ClientOrderStatus.PREORDER,
                 limit=10_000,
             )
-            order_ids = tuple(order.id for order in orders)
+        if not orders:
+            return
+        candidates = tuple((order.id, order.requested_robux) for order in orders)
+        order_ids, stock = await self._workflows.plan_preorders(candidates)
+        settings = await self._get_settings()
+        if (
+            order_ids
+            and stock is not None
+            and self._notifications is not None
+            and settings.telegram_notifications_enabled
+            and NotificationType.AUTOMATIC_REORDER in settings.notification_categories
+        ):
+            await self._notifications.queue(
+                notification_type=NotificationType.AUTOMATIC_REORDER,
+                title="Stock appeared",
+                message=_stock_appeared_message(stock, len(order_ids)),
+            )
         for order_id in order_ids:
             try:
                 await self._workflows.start_purchase(order_id)
@@ -99,6 +121,8 @@ class AutomationLoop:
                     "automatic_reorder_failed",
                     extra={"order_id": str(order_id)},
                 )
+        if self._notifications is not None:
+            await self._notifications.deliver_pending()
 
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -131,3 +155,14 @@ class AutomationLoop:
             if self._settings_defaults is None:
                 raise RuntimeError("System Settings are not initialized")
             return await repository.save(create_settings(self._settings_defaults))
+
+
+def _stock_appeared_message(stock: MarketplaceStock, preorder_count: int) -> str:
+    suffix = "PreOrder" if preorder_count == 1 else "PreOrders"
+    return (
+        "<b>🟢 Stock appeared</b>\n"
+        f"Rate: {stock.rate.normalize()}$\n"
+        f"Available: {stock.total_robux_amount} R$\n"
+        f"Largest instant order: {stock.max_instant_order} R$\n"
+        f"🔄 Requeueing {preorder_count} {suffix}…"
+    )

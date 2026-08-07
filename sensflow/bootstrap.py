@@ -7,6 +7,7 @@ from sensflow.application.automation_loop import AutomationLoop
 from sensflow.application.gateways import UnavailableRobloxGateway
 from sensflow.application.lifecycle import Application
 from sensflow.application.marketplace_workflows import MarketplaceWorkflows
+from sensflow.application.notifications import NotificationService
 from sensflow.application.rbxcreate_bridge import RbxcreateBridge
 from sensflow.application.recovery import RecoveryService
 from sensflow.application.services import (
@@ -25,6 +26,7 @@ from sensflow.infrastructure.database.session import (
 from sensflow.infrastructure.logging import configure_logging
 from sensflow.integrations.rbxcreate import RbxcrateDryRunGateway, RbxcrateGateway
 from sensflow.presentation.telegram import create_bot, create_dispatcher
+from sensflow.presentation.telegram.notifications import TelegramOperatorNotifier
 
 
 def create_application(settings: Settings) -> Application:
@@ -62,10 +64,15 @@ def create_application(settings: Settings) -> Application:
         settings_defaults=settings_defaults,
         minimum_purchase_rate=settings.marketplace.minimum_purchase_rate,
     )
+    notifications = NotificationService(
+        sessions,
+        TelegramOperatorNotifier(bot, settings.telegram.operator_id),
+    )
     automation = AutomationLoop(
         sessions,
         marketplace_workflows,
         settings_defaults=settings_defaults,
+        notifications=notifications,
     )
     recovery = RecoveryService(sessions, marketplace_workflows)
     order_service = OrderApplicationService(

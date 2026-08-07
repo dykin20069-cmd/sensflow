@@ -45,6 +45,12 @@ class MarketplaceGateway(Protocol):
     async def cancel_order(self, external_order_id: str) -> MarketplaceCancellationResult: ...
 
 
+class OperatorNotifier(Protocol):
+    """Deliver one already formatted operator notification."""
+
+    async def send(self, message: str) -> None: ...
+
+
 class UnavailableRobloxGateway:
     """Safe production boundary until Roblox integration is implemented."""
 

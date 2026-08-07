@@ -16,7 +16,7 @@ from sensflow.application.commands import (
     OrderActionCommand,
     UpdateSettingCommand,
 )
-from sensflow.application.errors import AuthorizationError
+from sensflow.application.errors import AuthorizationError, ConflictError
 from sensflow.application.gateways import MarketplaceCancellationResult
 from sensflow.application.services import (
     CustomerApplicationService,
@@ -152,6 +152,7 @@ def test_create_order_persists_manual_customer_and_draft_without_roblox_lookup()
 
         customers.save = AsyncMock(side_effect=save_customer)
         orders = MagicMock()
+        orders.find_similar_active = AsyncMock(return_value=None)
 
         async def save_order(order: object) -> object:
             order.id = order_id
@@ -201,6 +202,52 @@ def test_create_order_persists_manual_customer_and_draft_without_roblox_lookup()
         assert event.event_type is TimelineEventType.ORDER_CREATED
         assert str(order_id) in result.message
         assert result.order_id == order_id
+
+    asyncio.run(exercise())
+
+
+def test_create_order_rejects_matching_waiting_order_without_override() -> None:
+    async def exercise() -> None:
+        customer = Customer(
+            id=uuid4(),
+            roblox_user_id=None,
+            current_username="Builderman",
+            current_place_id=200,
+        )
+        customers = MagicMock()
+        customers.get_by_username_for_update = AsyncMock(return_value=customer)
+        customers.save = AsyncMock(side_effect=lambda value: value)
+        orders = MagicMock()
+        orders.find_similar_active = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+        orders.save = AsyncMock()
+        settings = MagicMock()
+        settings.get_current = AsyncMock(return_value=settings_row())
+        service = OrderApplicationService(
+            TransactionFactory(),
+            settings_defaults=settings_defaults(),
+            operator_id=42,
+            clock=lambda: NOW,
+        )
+
+        with (
+            patch("sensflow.application.services.CustomerRepository", return_value=customers),
+            patch("sensflow.application.services.ClientOrderRepository", return_value=orders),
+            patch(
+                "sensflow.application.services.SystemSettingsRepository",
+                return_value=settings,
+            ),
+            pytest.raises(ConflictError, match="Similar active order"),
+        ):
+            await service.create_order(
+                CreateOrderCommand(
+                    username="Builderman",
+                    requested_robux=100,
+                    place_id=200,
+                    operator_id=42,
+                )
+            )
+
+        orders.save.assert_not_awaited()
 
     asyncio.run(exercise())
 

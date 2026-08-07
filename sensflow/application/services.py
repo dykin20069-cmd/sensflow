@@ -23,6 +23,7 @@ from sensflow.application.commands import (
 )
 from sensflow.application.dto import (
     ActionResultDTO,
+    CurrentStockDTO,
     CustomerAction,
     CustomerDetailDTO,
     CustomerSummaryDTO,
@@ -55,6 +56,7 @@ from sensflow.application.gateways import (
 )
 from sensflow.application.marketplace_workflows import MarketplaceWorkflows
 from sensflow.application.queries import (
+    FindSimilarOrderQuery,
     GetCustomerQuery,
     GetOrderQuery,
     GetStatisticsQuery,
@@ -174,6 +176,14 @@ def _timeline_event(event: TimelineEvent) -> TimelineEventDTO:
 
 
 def _order_detail(order: ClientOrder) -> OrderDetailDTO:
+    current_attempt = next(
+        (
+            attempt
+            for attempt in reversed(order.marketplace_orders)
+            if attempt.marketplace_status is MarketplaceOrderStatus.ACTIVE
+        ),
+        order.marketplace_orders[-1] if order.marketplace_orders else None,
+    )
     completed_attempt = next(
         (
             attempt
@@ -198,6 +208,12 @@ def _order_detail(order: ClientOrder) -> OrderDetailDTO:
         completed_at=order.completed_at,
         timeline=tuple(_timeline_event(event) for event in order.timeline_events),
         marketplace_rate=(None if completed_attempt is None else completed_attempt.purchase_rate),
+        marketplace_status=(
+            None if current_attempt is None else current_attempt.marketplace_status
+        ),
+        marketplace_order_reference=(
+            None if current_attempt is None else current_attempt.rbxcreate_order_id
+        ),
         available_actions=_order_actions(order.current_status),
     )
 
@@ -366,6 +382,23 @@ class OrderApplicationService:
                 raise NotFoundError("Client Order")
             return _order_detail(order)
 
+    async def find_similar_order(
+        self,
+        query: FindSimilarOrderQuery,
+    ) -> OrderDetailDTO | None:
+        async with self._sessions() as session:
+            order = await ClientOrderRepository(session).find_similar_active(
+                username=query.username,
+                place_id=query.place_id,
+                requested_robux=query.requested_robux,
+            )
+            return None if order is None else _order_detail(order)
+
+    async def get_current_stock(self) -> CurrentStockDTO:
+        if self._marketplace_workflows is None:
+            raise FeatureUnavailableError("Marketplace stock lookup")
+        return await self._marketplace_workflows.get_current_stock()
+
     async def get_timeline(self, query: GetOrderQuery) -> tuple[TimelineEventDTO, ...]:
         return (await self.get_order(query)).timeline
 
@@ -432,6 +465,14 @@ class OrderApplicationService:
                 for_update=False,
             )
             orders = ClientOrderRepository(session)
+            if not command.allow_duplicate:
+                similar = await orders.find_similar_active(
+                    username=command.username,
+                    place_id=command.place_id,
+                    requested_robux=command.requested_robux,
+                )
+                if similar is not None:
+                    raise ConflictError(f"Similar active order {similar.id} already exists")
             order = await orders.save(
                 create_draft(
                     customer,
@@ -559,7 +600,9 @@ class OrderApplicationService:
 
     async def manual_reorder(self, command: OrderActionCommand) -> ActionResultDTO:
         _authorize(command.operator_id, self._operator_id)
-        raise FeatureUnavailableError("Manual reorder")
+        if self._marketplace_workflows is None:
+            raise FeatureUnavailableError("Manual reorder")
+        return await self._marketplace_workflows.manual_requeue(command.order_id)
 
     async def finalize_purchase(
         self,

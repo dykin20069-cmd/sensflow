@@ -10,7 +10,11 @@ from sensflow.domain.enums import ClientOrderStatus, StatisticsPeriod
 
 
 class MainSection(StrEnum):
+    DASHBOARD = "dashboard"
     CREATE_ORDER = "create"
+    ACTIVE_ORDERS = "active"
+    PREORDERS = "preorders"
+    CURRENT_STOCK = "stock"
     ORDERS = "orders"
     CUSTOMERS = "customers"
     STATISTICS = "statistics"
@@ -28,11 +32,15 @@ class NavigationAction(StrEnum):
 
 class NavigationTarget(StrEnum):
     MAIN = "main"
+    CREATE_ORDER = "create"
+    ORDER_EDIT = "order_edit"
+    CUSTOMER_DETAILS = "customer_details"
     ORDERS = "orders"
     CUSTOMERS = "customers"
     STATISTICS = "statistics"
     SETTINGS = "settings"
     SYSTEM_STATUS = "status"
+    CURRENT_STOCK = "stock"
 
 
 class OrderCallbackAction(StrEnum):
@@ -49,6 +57,9 @@ class OrderCallbackAction(StrEnum):
     TIMELINE = "timeline"
     CONFIRM_PLACE_ID = "place_ok"
     ENTER_PLACE_ID = "place_manual"
+    REUSE_SIMILAR = "reuse"
+    CREATE_DUPLICATE = "duplicate"
+    ABORT_CREATE = "abort_create"
 
 
 class CustomerCallbackAction(StrEnum):

@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, Message
 
 from sensflow.application.commands import SystemActionCommand
 from sensflow.application.errors import ApplicationError
-from sensflow.application.ports import SystemUseCases
+from sensflow.application.ports import OrderUseCases, SystemUseCases
 from sensflow.presentation.telegram.callbacks import (
     MainSection,
     MenuCallback,
@@ -20,6 +20,7 @@ from sensflow.presentation.telegram.callbacks import (
 from sensflow.presentation.telegram.errors import show_error
 from sensflow.presentation.telegram.rendering import (
     render_action_result,
+    render_current_stock,
     render_main_menu,
     render_system_status,
     show_screen,
@@ -29,8 +30,16 @@ router = Router(name="main")
 
 
 @router.message(CommandStart())
-async def show_main_menu(message: Message) -> None:
+async def show_main_menu(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await show_screen(message, render_main_menu())
+
+
+@router.callback_query(MenuCallback.filter(F.section == MainSection.DASHBOARD))
+async def show_dashboard(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.clear()
+    await show_screen(callback, render_main_menu())
 
 
 @router.callback_query(NavigationCallback.filter(F.action == NavigationAction.NOOP))
@@ -45,12 +54,44 @@ async def navigate_home(callback: CallbackQuery, state: FSMContext) -> None:
     await show_screen(callback, render_main_menu())
 
 
+@router.callback_query(
+    NavigationCallback.filter(
+        (F.action == NavigationAction.BACK) & (F.target == NavigationTarget.MAIN)
+    )
+)
+async def navigate_back_to_dashboard(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.clear()
+    await show_screen(callback, render_main_menu())
+
+
 @router.callback_query(NavigationCallback.filter(F.action == NavigationAction.CLOSE))
 async def close_screen(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.clear()
     if callback.message is not None:
         await callback.message.delete()
+
+
+@router.callback_query(MenuCallback.filter(F.section == MainSection.CURRENT_STOCK))
+@router.callback_query(
+    NavigationCallback.filter(
+        (F.action == NavigationAction.REFRESH) & (F.target == NavigationTarget.CURRENT_STOCK)
+    )
+)
+async def show_current_stock(
+    callback: CallbackQuery,
+    state: FSMContext,
+    orders: OrderUseCases,
+) -> None:
+    await callback.answer()
+    await state.clear()
+    try:
+        stock = await orders.get_current_stock()
+    except ApplicationError as error:
+        await show_error(callback, error)
+        return
+    await show_screen(callback, render_current_stock(stock))
 
 
 @router.callback_query(MenuCallback.filter(F.section == MainSection.SYSTEM_STATUS))

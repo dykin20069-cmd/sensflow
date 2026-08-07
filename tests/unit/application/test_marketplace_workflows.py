@@ -9,7 +9,10 @@ from typing import Any
 from uuid import uuid4
 
 import sensflow.application.marketplace_workflows as workflow_module
-from sensflow.application.marketplace_workflows import MarketplaceWorkflows
+from sensflow.application.marketplace_workflows import (
+    MarketplaceWorkflows,
+    _format_purchase_completed_notification,
+)
 from sensflow.application.rbxcreate_bridge import (
     MarketplaceCreateResult,
     MarketplaceStock,
@@ -51,6 +54,7 @@ class Bridge:
         self.stock = stock
         self.sync = sync
         self.create_calls: list[dict[str, object]] = []
+        self.cancel_calls: list[str] = []
         self.sync_calls = 0
 
     async def get_detailed_stock(self) -> tuple[MarketplaceStock, ...]:
@@ -67,6 +71,9 @@ class Bridge:
         self.sync_calls += 1
         assert self.sync is not None
         return self.sync
+
+    async def cancel_order(self, external_order_id: str) -> None:
+        self.cancel_calls.append(external_order_id)
 
 
 def _customer() -> Customer:
@@ -263,6 +270,30 @@ def test_start_purchase_moves_order_to_preorder_when_stock_is_insufficient(
     asyncio.run(scenario())
 
 
+def test_manual_requeue_cancels_and_replaces_active_attempt_atomically(
+    monkeypatch: Any,
+) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        attempt = _attempt(order)
+        state = _wire(monkeypatch, customer=customer, order=order, attempt=attempt)
+        bridge = Bridge(stock=(MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),))
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        result = await workflows.manual_requeue(order.id)
+
+        replacement = state.saved_marketplace[-1]
+        assert result.message == "Active Marketplace Order was requeued."
+        assert bridge.cancel_calls == [attempt.rbxcreate_order_id]
+        assert attempt.marketplace_status is MarketplaceOrderStatus.CANCELLED
+        assert replacement is not attempt
+        assert replacement.marketplace_status is MarketplaceOrderStatus.ACTIVE
+        assert order.current_status is ClientOrderStatus.PURCHASING
+
+    asyncio.run(scenario())
+
+
 def test_synchronization_completes_exactly_once(monkeypatch: Any) -> None:
     async def scenario() -> None:
         customer = _customer()
@@ -322,3 +353,36 @@ def test_synchronization_returns_to_preorder_on_external_error(monkeypatch: Any)
         assert attempt.marketplace_status is MarketplaceOrderStatus.CANCELLED
 
     asyncio.run(scenario())
+
+
+def test_purchase_completed_notification_uses_persisted_financial_snapshot() -> None:
+    customer = _customer()
+    order = _order(customer, ClientOrderStatus.COMPLETED)
+    order.requested_robux = 100
+    order.customer_receives = 70
+    order.marketplace_cost = Decimal("0.3900")
+    order.marketplace_commission = Decimal("0.0200")
+    order.final_cost_usd = Decimal("0.4100")
+    order.final_cost_local_currency = Decimal("36.9000")
+    attempt = _attempt(order)
+    attempt.marketplace_status = MarketplaceOrderStatus.COMPLETED
+    attempt.purchase_rate = Decimal("3.9")
+    attempt.requested_robux = 100
+    attempt.purchased_robux = 100
+    attempt.remaining_robux = 0
+
+    message = _format_purchase_completed_notification(
+        order,
+        attempt,
+        "viki_show2010435",
+        Decimal("0.05"),
+        Decimal("90"),
+    )
+
+    assert "Purchased: 100 R$" in message
+    assert "Client receives: 70 R$" in message
+    assert "Rate: 3.9$" in message
+    assert "Marketplace cost: $0.39" in message
+    assert "Fee 5%: $0.02" in message
+    assert "Total paid: $0.41" in message
+    assert "Total RUB: 36.90 ₽" in message

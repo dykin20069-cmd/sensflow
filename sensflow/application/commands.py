@@ -36,6 +36,7 @@ class CreateOrderCommand(PrepareCreateOrderCommand):
 
     place_id: int = Field(gt=0, le=POSTGRESQL_BIGINT_MAX)
     operator_id: int = Field(gt=0)
+    allow_duplicate: bool = False
 
 
 class OrderActionCommand(OperatorCommand):

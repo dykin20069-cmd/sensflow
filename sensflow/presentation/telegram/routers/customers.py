@@ -123,8 +123,33 @@ async def begin_place_id_update(
     await state.update_data(place_id_customer_id=str(callback_data.customer_id))
     await show_screen(
         callback,
-        Screen(text="Send the new Place ID.", reply_markup=navigation_keyboard()),
+        Screen(
+            text="Send the new Place ID.",
+            reply_markup=navigation_keyboard(back_target=NavigationTarget.CUSTOMER_DETAILS),
+        ),
     )
+
+
+@router.callback_query(
+    CustomerPlaceIDStates.place_id,
+    NavigationCallback.filter(
+        (F.action == NavigationAction.BACK) & (F.target == NavigationTarget.CUSTOMER_DETAILS)
+    ),
+)
+async def back_from_place_id_update(
+    callback: CallbackQuery,
+    state: FSMContext,
+    customers: CustomerUseCases,
+) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    customer_id = data.get("place_id_customer_id")
+    await state.clear()
+    if customer_id is None:
+        await show_screen(callback, render_customer_search_prompt())
+        return
+    customer = await customers.get_customer(GetCustomerQuery(customer_id=customer_id))
+    await show_screen(callback, render_customer_details(customer))
 
 
 @router.message(CustomerPlaceIDStates.place_id)

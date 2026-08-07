@@ -71,12 +71,12 @@ def test_main_menu_and_fsm_cover_documented_skeleton() -> None:
     labels = [button.text for row in keyboard.inline_keyboard for button in row]
 
     assert labels == [
-        "+ Create Order",
-        "📦 Orders",
-        "👤 Customers",
-        "📊 Statistics",
+        "🏠 Dashboard",
+        "🛒 Create Order",
+        "📦 Active Orders",
+        "⏳ PreOrders",
+        "📊 Current Stock",
         "⚙️ Settings",
-        "🟢 System Status",
     ]
     assert render_main_menu().reply_markup == keyboard
     assert CreateOrderStates.username.state is not None

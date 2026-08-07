@@ -26,12 +26,13 @@ from sensflow.presentation.telegram.keyboards import navigation_keyboard
 from sensflow.presentation.telegram.rendering import (
     Screen,
     render_action_result,
+    render_main_menu,
+    render_order_card,
     render_order_details,
     render_order_list,
     render_order_search_prompt,
     render_order_search_results,
     render_orders_menu,
-    render_timeline,
     show_screen,
 )
 from sensflow.presentation.telegram.states import DraftEditStates, OrderSearchStates
@@ -42,6 +43,37 @@ router = Router(name="orders")
 async def _show_orders_menu(callback: CallbackQuery, orders: OrderUseCases) -> None:
     counts = await orders.get_status_counts()
     await show_screen(callback, render_orders_menu(counts))
+
+
+async def _show_status_page(
+    callback: CallbackQuery,
+    orders: OrderUseCases,
+    status: ClientOrderStatus,
+) -> None:
+    page = await orders.list_orders(ListOrdersQuery(status=status))
+    await show_screen(callback, render_order_list(page, status))
+
+
+@router.callback_query(MenuCallback.filter(F.section == MainSection.ACTIVE_ORDERS))
+async def show_active_orders(
+    callback: CallbackQuery,
+    state: FSMContext,
+    orders: OrderUseCases,
+) -> None:
+    await callback.answer()
+    await state.clear()
+    await _show_status_page(callback, orders, ClientOrderStatus.PURCHASING)
+
+
+@router.callback_query(MenuCallback.filter(F.section == MainSection.PREORDERS))
+async def show_preorders(
+    callback: CallbackQuery,
+    state: FSMContext,
+    orders: OrderUseCases,
+) -> None:
+    await callback.answer()
+    await state.clear()
+    await _show_status_page(callback, orders, ClientOrderStatus.PREORDER)
 
 
 @router.callback_query(MenuCallback.filter(F.section == MainSection.ORDERS))
@@ -65,15 +97,15 @@ async def show_orders_menu(
 async def show_order_status_page(
     callback: CallbackQuery,
     callback_data: OrderCallback,
+    state: FSMContext,
     orders: OrderUseCases,
 ) -> None:
     await callback.answer()
     if callback_data.status is None:
         await show_error(callback, InputValidationError(("status: missing",)))
         return
-    query = ListOrdersQuery(status=callback_data.status)
-    page = await orders.list_orders(query)
-    await show_screen(callback, render_order_list(page, callback_data.status))
+    await state.clear()
+    await _show_status_page(callback, orders, callback_data.status)
 
 
 @router.callback_query(OrderCallback.filter(F.action == OrderCallbackAction.SEARCH))
@@ -81,6 +113,20 @@ async def begin_order_search(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
     await state.set_state(OrderSearchStates.query)
     await show_screen(callback, render_order_search_prompt())
+
+
+@router.callback_query(
+    OrderSearchStates.query,
+    NavigationCallback.filter(F.action == NavigationAction.BACK),
+)
+async def back_from_order_search(
+    callback: CallbackQuery,
+    state: FSMContext,
+    orders: OrderUseCases,
+) -> None:
+    await callback.answer()
+    await state.clear()
+    await _show_orders_menu(callback, orders)
 
 
 @router.message(OrderSearchStates.query)
@@ -150,7 +196,7 @@ async def show_order_details(
     except ApplicationError as error:
         await show_error(callback, error)
         return
-    await show_screen(callback, render_order_details(order))
+    await show_screen(callback, render_order_card(order))
 
 
 @router.callback_query(OrderCallback.filter(F.action == OrderCallbackAction.TIMELINE))
@@ -164,11 +210,11 @@ async def show_order_timeline(
         await show_error(callback, InputValidationError(("order_id: missing",)))
         return
     try:
-        events = await orders.get_timeline(GetOrderQuery(order_id=callback_data.order_id))
+        order = await orders.get_order(GetOrderQuery(order_id=callback_data.order_id))
     except ApplicationError as error:
         await show_error(callback, error)
         return
-    await show_screen(callback, render_timeline(events))
+    await show_screen(callback, render_order_details(order))
 
 
 @router.callback_query(OrderCallback.filter(F.action == OrderCallbackAction.EDIT_DRAFT))
@@ -187,7 +233,7 @@ async def begin_draft_edit(
         callback,
         Screen(
             text="Send the new Requested Robux, or <code>-</code> to keep it unchanged.",
-            reply_markup=navigation_keyboard(),
+            reply_markup=navigation_keyboard(back_target=NavigationTarget.ORDER_EDIT),
         ),
     )
 
@@ -208,7 +254,43 @@ async def receive_draft_robux(message: Message, state: FSMContext) -> None:
         message,
         Screen(
             text="Send the new Place ID, or <code>-</code> to keep it unchanged.",
-            reply_markup=navigation_keyboard(),
+            reply_markup=navigation_keyboard(back_target=NavigationTarget.ORDER_EDIT),
+        ),
+    )
+
+
+@router.callback_query(
+    DraftEditStates.requested_robux,
+    NavigationCallback.filter(F.action == NavigationAction.BACK),
+)
+async def back_from_draft_amount(
+    callback: CallbackQuery,
+    state: FSMContext,
+    orders: OrderUseCases,
+) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    order_id = data.get("edit_order_id")
+    await state.clear()
+    if order_id is None:
+        await show_screen(callback, render_main_menu())
+        return
+    order = await orders.get_order(GetOrderQuery(order_id=order_id))
+    await show_screen(callback, render_order_card(order))
+
+
+@router.callback_query(
+    DraftEditStates.place_id,
+    NavigationCallback.filter(F.action == NavigationAction.BACK),
+)
+async def back_from_draft_place_id(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(DraftEditStates.requested_robux)
+    await show_screen(
+        callback,
+        Screen(
+            text="Send the new Requested Robux, or <code>-</code> to keep it unchanged.",
+            reply_markup=navigation_keyboard(back_target=NavigationTarget.ORDER_EDIT),
         ),
     )
 
@@ -278,7 +360,8 @@ async def handle_order_action(
     }
     try:
         result = await use_cases[callback_data.action](command)
+        order = await orders.get_order(GetOrderQuery(order_id=callback_data.order_id))
     except ApplicationError as error:
         await show_error(callback, error)
         return
-    await show_screen(callback, render_action_result(result))
+    await show_screen(callback, render_order_card(order, result.message))

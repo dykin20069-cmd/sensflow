@@ -31,6 +31,35 @@ class ClientOrderRepository(Repository[ClientOrder]):
         )
         return await self.session.scalar(statement)
 
+    async def find_similar_active(
+        self,
+        *,
+        username: str,
+        place_id: int,
+        requested_robux: int,
+    ) -> ClientOrder | None:
+        """Find the newest matching waiting or purchasing order."""
+        statement = (
+            select(ClientOrder)
+            .join(ClientOrder.customer)
+            .where(
+                func.lower(Customer.current_username) == username.casefold(),
+                ClientOrder.current_place_id == place_id,
+                ClientOrder.requested_robux == requested_robux,
+                ClientOrder.current_status.in_(
+                    (ClientOrderStatus.PREORDER, ClientOrderStatus.PURCHASING)
+                ),
+            )
+            .options(
+                selectinload(ClientOrder.customer),
+                selectinload(ClientOrder.timeline_events),
+                selectinload(ClientOrder.marketplace_orders),
+            )
+            .order_by(ClientOrder.created_at.desc(), ClientOrder.id)
+            .limit(1)
+        )
+        return await self.session.scalar(statement)
+
     async def list_by_status(
         self,
         status: ClientOrderStatus,

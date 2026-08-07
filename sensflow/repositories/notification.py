@@ -14,6 +14,10 @@ class NotificationRepository(Repository[Notification]):
 
     model = Notification
 
+    async def get_for_update(self, notification_id: UUID) -> Notification | None:
+        statement = select(Notification).where(Notification.id == notification_id).with_for_update()
+        return await self.session.scalar(statement)
+
     async def list_by_status(
         self,
         status: NotificationDeliveryStatus,
