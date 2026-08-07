@@ -1,0 +1,111 @@
+"""Compact typed callback payloads for Telegram inline keyboards."""
+
+from enum import StrEnum
+from uuid import UUID
+
+from aiogram.filters.callback_data import CallbackData
+
+from sensflow.application.commands import SettingField
+from sensflow.domain.enums import ClientOrderStatus, StatisticsPeriod
+
+
+class MainSection(StrEnum):
+    CREATE_ORDER = "create"
+    ORDERS = "orders"
+    CUSTOMERS = "customers"
+    STATISTICS = "statistics"
+    SETTINGS = "settings"
+    SYSTEM_STATUS = "status"
+
+
+class NavigationAction(StrEnum):
+    NOOP = "noop"
+    HOME = "home"
+    BACK = "back"
+    REFRESH = "refresh"
+    CLOSE = "close"
+
+
+class NavigationTarget(StrEnum):
+    MAIN = "main"
+    ORDERS = "orders"
+    CUSTOMERS = "customers"
+    STATISTICS = "statistics"
+    SETTINGS = "settings"
+    SYSTEM_STATUS = "status"
+
+
+class OrderCallbackAction(StrEnum):
+    LIST = "list"
+    SEARCH = "search"
+    DETAILS = "details"
+    CONFIRM_PAYMENT = "pay"
+    EDIT_DRAFT = "edit"
+    DELETE_DRAFT = "delete"
+    START_PURCHASE = "start"
+    MANUAL_REORDER = "reorder"
+    CANCEL = "cancel"
+    REFRESH = "refresh"
+    TIMELINE = "timeline"
+    CONFIRM_PLACE_ID = "place_ok"
+    ENTER_PLACE_ID = "place_manual"
+
+
+class CustomerCallbackAction(StrEnum):
+    DETAILS = "details"
+    REFRESH = "refresh"
+    UPDATE_PLACE_ID = "place"
+    ARCHIVE = "archive"
+
+
+class SettingsCallbackAction(StrEnum):
+    EDIT = "edit"
+
+
+class SystemCallbackAction(StrEnum):
+    RUN_RECOVERY = "recover"
+    RUN_SYNC = "sync"
+
+
+class PageScope(StrEnum):
+    ORDERS = "orders"
+    CUSTOMERS = "customers"
+
+
+class MenuCallback(CallbackData, prefix="m"):
+    section: MainSection
+
+
+class NavigationCallback(CallbackData, prefix="n"):
+    action: NavigationAction
+    target: NavigationTarget = NavigationTarget.MAIN
+
+
+class OrderCallback(CallbackData, prefix="o"):
+    action: OrderCallbackAction
+    order_id: UUID | None = None
+    status: ClientOrderStatus | None = None
+
+
+class CustomerCallback(CallbackData, prefix="c"):
+    action: CustomerCallbackAction
+    customer_id: UUID
+
+
+class SettingsCallback(CallbackData, prefix="s"):
+    action: SettingsCallbackAction
+    field: SettingField
+
+
+class StatisticsCallback(CallbackData, prefix="st"):
+    period: StatisticsPeriod
+
+
+class SystemCallback(CallbackData, prefix="sys"):
+    action: SystemCallbackAction
+
+
+class PageCallback(CallbackData, prefix="p"):
+    scope: PageScope
+    page: int
+    key: str = ""
