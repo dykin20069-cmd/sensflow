@@ -1,9 +1,35 @@
 """Deterministic safeguards for detailed RBXCrate stock selection."""
 
+import asyncio
 from decimal import Decimal
 
 from sensflow.application.marketplace_workflows import _select_stock
-from sensflow.application.rbxcreate_bridge import MarketplaceStock
+from sensflow.application.rbxcreate_bridge import MarketplaceStock, RbxcreateBridge
+from sensflow.integrations.rbxcreate.models import DetailedStockItem
+
+
+class DetailedStockGateway:
+    async def get_detailed_stock(self) -> tuple[DetailedStockItem, ...]:
+        return (
+            DetailedStockItem(
+                rate=Decimal("4.2"),
+                accounts_count=3,
+                max_instant_order=427,
+                total_robux_amount=1325,
+            ),
+            DetailedStockItem(
+                rate=Decimal("4.3"),
+                accounts_count=25,
+                max_instant_order=338,
+                total_robux_amount=9071,
+            ),
+            DetailedStockItem(
+                rate=Decimal("4.5"),
+                accounts_count=1,
+                max_instant_order=257,
+                total_robux_amount=367,
+            ),
+        )
 
 
 def _stock(
@@ -35,10 +61,16 @@ def _select(
     )
 
 
-def test_real_detailed_stock_selects_for_100_robux_order() -> None:
-    stock = _stock("4.3")
+def test_real_detailed_stock_selects_cheapest_entry_for_100_robux_order() -> None:
+    bridge = RbxcreateBridge(DetailedStockGateway())  # type: ignore[arg-type]
+    stock = asyncio.run(bridge.get_detailed_stock())
 
-    assert _select(stock) is stock
+    selected = _select(*stock, minimum_purchase_rate="0", maximum_purchase_rate="4.5")
+
+    assert selected is not None
+    assert selected.rate == Decimal("4.2")
+    assert selected.max_instant_order == 427
+    assert selected.total_robux_amount == 1325
 
 
 def test_stock_with_insufficient_max_instant_order_is_rejected() -> None:

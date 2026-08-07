@@ -117,12 +117,13 @@ class MarketplaceWorkflows:
                         )
                     )
 
+                settings = await self._get_settings(session)
                 stock = await self._bridge.get_detailed_stock()
                 selected = _select_stock(
                     stock,
                     requested_robux=order.requested_robux,
                     minimum_purchase_rate=self._minimum_purchase_rate,
-                    maximum_purchase_rate=order.marketplace_rate_limit,
+                    maximum_purchase_rate=settings.maximum_purchase_rate,
                 )
                 if selected is None:
                     if order.current_status is ClientOrderStatus.DRAFT:
@@ -158,6 +159,7 @@ class MarketplaceWorkflows:
                     raise DomainConflictError(
                         "The Client Order already has an active Marketplace Order"
                     )
+                order.marketplace_rate_limit = settings.maximum_purchase_rate
                 start_purchasing(order)
                 external = await self._bridge.create_gamepass_order(
                     roblox_username=customer.current_username,
@@ -463,16 +465,16 @@ def _select_stock(
     minimum_purchase_rate: Decimal,
     maximum_purchase_rate: Decimal,
 ) -> MarketplaceStock | None:
-    suitable = (
+    eligible = [
         item
         for item in stock
         if item.rate >= minimum_purchase_rate
         and item.rate <= maximum_purchase_rate
         and item.max_instant_order >= requested_robux
         and item.total_robux_amount >= requested_robux
-    )
-    return min(
-        suitable,
+    ]
+    ordered = sorted(
+        eligible,
         key=lambda item: (item.rate, -item.total_robux_amount),
-        default=None,
     )
+    return ordered[0] if ordered else None

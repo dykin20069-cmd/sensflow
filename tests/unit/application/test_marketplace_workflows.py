@@ -111,6 +111,7 @@ def _wire(
     customer: Customer,
     order: ClientOrder,
     attempt: MarketplaceOrder | None = None,
+    maximum_purchase_rate: Decimal = Decimal("2.50"),
 ) -> SimpleNamespace:
     saved_marketplace: list[MarketplaceOrder] = []
     timeline: list[object] = []
@@ -154,7 +155,7 @@ def _wire(
             return event
 
     settings = SystemSettings(
-        maximum_purchase_rate=Decimal("2.50"),
+        maximum_purchase_rate=maximum_purchase_rate,
         automatic_reorder_enabled=True,
         automatic_reorder_interval_seconds=60,
         marketplace_monitoring_interval_seconds=60,
@@ -204,6 +205,41 @@ def test_start_purchase_chooses_lowest_valid_rate_and_skips_overpriced(monkeypat
         assert state.saved_marketplace[-1].purchase_rate == Decimal("2.00")
         assert bridge.create_calls[0]["order_id"] == str(order.id)
         assert "gamepass_id" not in bridge.create_calls[0]
+
+    asyncio.run(scenario())
+
+
+def test_start_purchase_uses_current_rate_limit_for_existing_draft(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.DRAFT)
+        order.requested_robux = 100
+        order.marketplace_rate_limit = Decimal("1.00")
+        state = _wire(
+            monkeypatch,
+            customer=customer,
+            order=order,
+            maximum_purchase_rate=Decimal("4.5"),
+        )
+        bridge = Bridge(
+            stock=(
+                MarketplaceStock(Decimal("4.2"), 3, 427, 1325),
+                MarketplaceStock(Decimal("4.3"), 25, 338, 9071),
+                MarketplaceStock(Decimal("4.5"), 1, 257, 367),
+            )
+        )
+        workflows = MarketplaceWorkflows(
+            Sessions(),
+            bridge,
+            minimum_purchase_rate=Decimal("0"),
+            clock=lambda: NOW,
+        )  # type: ignore[arg-type]
+
+        result = await workflows.start_purchase(order.id)
+
+        assert result.message == "Purchase started via RBXCrate."
+        assert order.marketplace_rate_limit == Decimal("4.5")
+        assert state.saved_marketplace[-1].purchase_rate == Decimal("4.2")
 
     asyncio.run(scenario())
 
