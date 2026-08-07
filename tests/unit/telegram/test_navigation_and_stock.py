@@ -94,6 +94,30 @@ def test_stock_rendering_formats_rate_tiers_and_policy() -> None:
     assert "Updated: 14:54:12 UTC" in screen.text
 
 
+def test_stock_rendering_places_cheapest_visible_level_last() -> None:
+    stock = CurrentStockDTO(
+        items=tuple(
+            MarketplaceStockDTO(
+                rate=Decimal(rate),
+                accounts_count=1,
+                max_instant_order=100,
+                total_robux_amount=100,
+            )
+            for rate in ("3.9", "4.5", "4.8", "5.0")
+        ),
+        maximum_purchase_rate=Decimal("4.5"),
+        preferred_rate=Decimal("4.3"),
+        updated_at=datetime(2026, 8, 7, 22, 29, 49, tzinfo=UTC),
+    )
+
+    screen = render_current_stock(stock)
+    rendered_rates = [
+        line.split()[1] for line in screen.text.splitlines() if line.startswith(("🟢", "🟡", "🔴"))
+    ]
+
+    assert rendered_rates == ["5$", "4.8$", "4.5$", "3.9$"]
+
+
 def test_stock_rendering_falls_back_to_five_cheapest_levels() -> None:
     stock = CurrentStockDTO(
         items=tuple(

@@ -143,6 +143,7 @@ def render_current_stock(stock: CurrentStockDTO) -> Screen:
     visible_levels = [item for item in ordered_levels if item.rate <= STOCK_VIEW_THRESHOLD]
     above_threshold = not visible_levels
     displayed_levels = visible_levels if visible_levels else ordered_levels[:5]
+    displayed_levels.sort(key=lambda item: item.rate, reverse=True)
 
     lines: list[str] = []
     if above_threshold:
