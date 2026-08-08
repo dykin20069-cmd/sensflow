@@ -18,7 +18,11 @@ from sensflow.application.dto import (
     OrderAction,
     OrderDetailDTO,
 )
-from sensflow.application.errors import FeatureUnavailableError, InputValidationError
+from sensflow.application.errors import (
+    FeatureUnavailableError,
+    InputValidationError,
+    MarketplaceGamepassNotFoundError,
+)
 from sensflow.infrastructure.config import TelegramSettings
 from sensflow.infrastructure.database.enums import ClientOrderStatus
 from sensflow.presentation.telegram.bot import create_bot
@@ -154,10 +158,17 @@ def test_renderers_escape_content_and_use_service_supplied_actions() -> None:
 def test_error_presentation_is_safe_and_specific() -> None:
     validation = error_screen(InputValidationError(("username: required",)))
     unavailable = error_screen(FeatureUnavailableError("Create Order"))
+    missing_gamepass = error_screen(
+        MarketplaceGamepassNotFoundError(
+            "❌ Для выбранной игры не удалось автоматически найти подходящий gamepass."
+        )
+    )
     unexpected = error_screen(RuntimeError("database-secret"))
 
     assert "username: required" in validation.text
     assert "later milestone" in unavailable.text
+    assert "не удалось автоматически найти подходящий gamepass" in missing_gamepass.text
+    assert "The action could not be completed" not in missing_gamepass.text
     assert "database-secret" not in unexpected.text
 
 

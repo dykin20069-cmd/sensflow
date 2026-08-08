@@ -61,10 +61,13 @@ class Bridge:
         stock: tuple[MarketplaceStock, ...] = (),
         sync: MarketplaceSyncResult | None = None,
         sync_results: tuple[MarketplaceSyncResult, ...] = (),
+        *,
+        creates_preorder: bool = False,
     ) -> None:
         self.stock = stock
         self.sync = sync
         self.sync_results = list(sync_results)
+        self.creates_preorder = creates_preorder
         self.create_calls: list[dict[str, object]] = []
         self.cancel_calls: list[str] = []
         self.sync_calls = 0
@@ -77,6 +80,7 @@ class Bridge:
         return MarketplaceCreateResult(
             external_order_id=str(values["order_id"]),
             status=MarketplaceOrderStatus.ACTIVE,
+            is_preorder=self.creates_preorder,
         )
 
     async def get_order_info(self, external_order_id: str) -> MarketplaceSyncResult:
@@ -400,6 +404,36 @@ def test_quick_mode_starts_immediately_above_the_preferred_rate(monkeypatch: Any
         assert result.message == "Purchase started via RBXCrate."
         assert order.current_status is ClientOrderStatus.PURCHASING
         assert state.saved_marketplace[-1].purchase_rate == Decimal("4.5")
+
+    asyncio.run(scenario())
+
+
+def test_supplier_preorder_is_started_and_returns_operator_warning(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.DRAFT)
+        order.requested_robux = 286
+        order.marketplace_rate_limit = Decimal("4.5")
+        order.preferred_rate = None
+        order.preferred_timeout_minutes = None
+        order.fallback_active = True
+        state = _wire(
+            monkeypatch,
+            customer=customer,
+            order=order,
+            maximum_purchase_rate=Decimal("4.5"),
+        )
+        bridge = Bridge(
+            stock=(MarketplaceStock(Decimal("4.5"), 3, 1_000, 2_000),),
+            creates_preorder=True,
+        )
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        result = await workflows.start_purchase(order.id)
+
+        assert "временно оформлен как предзаказ" in result.message
+        assert order.current_status is ClientOrderStatus.PURCHASING
+        assert state.saved_marketplace[-1].marketplace_status is MarketplaceOrderStatus.ACTIVE
 
     asyncio.run(scenario())
 

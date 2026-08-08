@@ -54,3 +54,12 @@ class RbxcrateUnsupportedStatusError(RbxcrateError):
 
 class RbxcrateApiError(RbxcrateError):
     """Transport, server, or unexpected response failure."""
+
+
+def is_out_of_stock_error(error: RbxcrateError) -> bool:
+    """Return whether RBXCrate rejected only the instant stock requirement."""
+    return (
+        error.status_code == 402
+        and error.response_text is not None
+        and "OUT_OF_STOCK" in error.response_text
+    )

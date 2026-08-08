@@ -85,6 +85,10 @@ logger = logging.getLogger(__name__)
 FRESH_PURCHASE_GUARD_SECONDS = 5
 STATUS_CHECK_COOLDOWN_SECONDS = 3
 STATUS_CHECK_BACKOFF_SECONDS = (5, 10, 20)
+SUPPLIER_PREORDER_MESSAGE = (
+    "⚠️ Товар временно оформлен как предзаказ. Выдача произойдёт автоматически после "
+    "появления свободного аккаунта поставщика."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +251,7 @@ class MarketplaceWorkflows:
         stock: tuple[MarketplaceStock, ...] | None = None,
     ) -> ActionResultDTO:
         """Select suitable stock and either start an attempt or retain a PreOrder."""
+        result_message = "Purchase started via RBXCrate."
         try:
             async with self._sessions.begin() as session:
                 orders = ClientOrderRepository(session)
@@ -337,6 +342,8 @@ class MarketplaceWorkflows:
                     raise MarketplaceIntegrationError(
                         "RBXCrate returned a terminal status while creating the order"
                     )
+                if external.is_preorder:
+                    result_message = SUPPLIER_PREORDER_MESSAGE
                 marketplace_order = create_marketplace_order(
                     order,
                     MarketplaceOrderResult(
@@ -374,13 +381,14 @@ class MarketplaceWorkflows:
                         "external_order_id": marketplace_order.rbxcreate_order_id,
                         "requested_robux": order.requested_robux,
                         "selected_rate": str(selected.rate),
+                        "supplier_preorder": external.is_preorder,
                     },
                 )
         except (DomainValidationError, DomainConflictError) as error:
             raise ConflictError(str(error)) from error
         except IntegrityError as error:
             raise ConflictError("The order changed concurrently; please refresh") from error
-        return ActionResultDTO(message="Purchase started via RBXCrate.")
+        return ActionResultDTO(message=result_message)
 
     async def synchronize_marketplace_order(
         self,

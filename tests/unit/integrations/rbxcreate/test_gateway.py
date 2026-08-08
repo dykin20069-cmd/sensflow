@@ -334,6 +334,8 @@ def test_4xx_errors_are_mapped_exactly_without_retry(
         assert "Remote message" in str(raised.value)
         assert "/api/orders/stock" in str(raised.value)
         assert "2026-08-07T08:00:00Z" in str(raised.value)
+        assert raised.value.response_text is not None
+        assert '"message":"Remote message"' in raised.value.response_text
 
     asyncio.run(exercise())
 

@@ -19,6 +19,7 @@ from sensflow.application.dto import (
     PublicPlaceDTO,
     StockAvailabilityDTO,
 )
+from sensflow.application.errors import MarketplaceGamepassNotFoundError
 from sensflow.domain.enums import ClientOrderStatus
 from sensflow.presentation.telegram.callbacks import (
     PlaceCallback,
@@ -337,7 +338,13 @@ def test_public_place_selection_creates_verified_purchase() -> None:
             return_value=ActionResultDTO(message="created", order_id=order_id)
         )
         orders.start_purchase = AsyncMock(
-            return_value=ActionResultDTO(message="Purchase started.", order_id=order_id)
+            return_value=ActionResultDTO(
+                message=(
+                    "⚠️ Товар временно оформлен как предзаказ. Выдача произойдёт "
+                    "автоматически после появления свободного аккаунта поставщика."
+                ),
+                order_id=order_id,
+            )
         )
         orders.get_order = AsyncMock(
             return_value=replace(
@@ -386,6 +393,59 @@ def test_public_place_selection_creates_verified_purchase() -> None:
         assert "Active Order" in rendered
         assert "⚡ Preferred: disabled" in rendered
         assert "🚀 Immediate execution allowed" in rendered
+        assert "временно оформлен как предзаказ" in rendered
+
+    asyncio.run(scenario())
+
+
+def test_quick_public_place_404_shows_specific_gamepass_guidance() -> None:
+    async def scenario() -> None:
+        state = MemoryState()
+        state.current = CreateOrderStates.place_selection
+        state.data = {
+            "username": "VerifiedUser",
+            "requested_robux": 100,
+            "roblox_user_id": 42,
+            "preferred_mode_enabled": False,
+            "public_places": [
+                {
+                    "place_id": 1_234_567_890,
+                    "place_name": "My Tycoon",
+                }
+            ],
+        }
+        order_id = uuid4()
+        orders = MagicMock()
+        orders.find_similar_order = AsyncMock(return_value=None)
+        orders.check_stock = AsyncMock(return_value=StockAvailabilityDTO(True, Decimal("4.5")))
+        orders.create_order = AsyncMock(
+            return_value=ActionResultDTO(message="created", order_id=order_id)
+        )
+        orders.start_purchase = AsyncMock(
+            side_effect=MarketplaceGamepassNotFoundError(
+                "❌ Для выбранной игры не удалось автоматически найти подходящий gamepass.\n"
+                "Попробуйте:\n"
+                "• выбрать другой плейс,\n"
+                "• или использовать режим \u0441 ручным gamepass ID."
+            )
+        )
+        orders.get_order = AsyncMock()
+        callback = telegram_callback()
+
+        await select_public_place(
+            callback,
+            PlaceCallback(action=PlaceCallbackAction.SELECT, index=0),
+            state,  # type: ignore[arg-type]
+            orders,
+        )
+
+        rendered = callback.message.edit_text.await_args.args[0]
+        assert "Для выбранной игры не удалось" in rendered
+        assert "выбрать другой плейс" in rendered
+        assert "ручным gamepass ID" in rendered
+        assert "The action could not be completed" not in rendered
+        assert state.cleared is False
+        orders.get_order.assert_not_awaited()
 
     asyncio.run(scenario())
 

@@ -3,6 +3,7 @@
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import NoReturn
 
 from sensflow.application.errors import (
     MarketplaceCancellationUnsupportedError,
@@ -17,9 +18,13 @@ from sensflow.integrations.rbxcreate.errors import (
     RbxcrateDailyLimitReachedError,
     RbxcrateError,
     RbxcrateUnsupportedStatusError,
+    is_out_of_stock_error,
 )
 from sensflow.integrations.rbxcreate.gateway import RbxcrateGateway
-from sensflow.integrations.rbxcreate.models import OrderInfoResponse
+from sensflow.integrations.rbxcreate.models import (
+    CreateGamepassOrderResponse,
+    OrderInfoResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +52,7 @@ class MarketplaceCreateResult:
 
     external_order_id: str
     status: MarketplaceOrderStatus
+    is_preorder: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,17 +120,52 @@ class RbxcreateBridge:
             place_id,
             gamepass_id,
         )
+        used_preorder_fallback = False
         try:
-            response = await self._gateway.create_gamepass_order(
+            response = await self._create_gamepass_order_request(
                 roblox_username=roblox_username,
                 order_id=order_id,
                 robux_amount=robux_amount,
-                gamepass_id=gamepass_id,
                 place_id=place_id,
+                gamepass_id=gamepass_id,
                 is_preorder=False,
-                check_ownership=True,
             )
         except RbxcrateError as error:
+            if not is_out_of_stock_error(error):
+                self._raise_create_error(
+                    error,
+                    roblox_username=roblox_username,
+                    robux_amount=robux_amount,
+                    place_id=place_id,
+                    gamepass_id=gamepass_id,
+                )
+            logger.warning(
+                "rbxcrate_instant_out_of_stock_fallback_to_preorder "
+                "username=%s amount=%s place_id=%s gamepass_id=%s",
+                roblox_username,
+                robux_amount,
+                place_id,
+                gamepass_id,
+            )
+            try:
+                response = await self._create_gamepass_order_request(
+                    roblox_username=roblox_username,
+                    order_id=order_id,
+                    robux_amount=robux_amount,
+                    place_id=place_id,
+                    gamepass_id=gamepass_id,
+                    is_preorder=True,
+                )
+            except RbxcrateError as preorder_error:
+                self._raise_create_error(
+                    preorder_error,
+                    roblox_username=roblox_username,
+                    robux_amount=robux_amount,
+                    place_id=place_id,
+                    gamepass_id=gamepass_id,
+                )
+            used_preorder_fallback = True
+        if not response.success:
             logger.error(
                 "rbxcrate_quick_order_failed username=%s amount=%s place_id=%s "
                 "gamepass_id=%s status=%s body=%s",
@@ -132,28 +173,76 @@ class RbxcreateBridge:
                 robux_amount,
                 place_id,
                 gamepass_id,
-                error.status_code,
-                error.response_text or str(error),
+                None,
+                "success=false",
             )
-            if error.status_code == 404 and place_id is not None and gamepass_id is None:
-                raise MarketplaceGamepassNotFoundError(
-                    GAMEPASS_NOT_FOUND_MESSAGE,
-                    status_code=error.status_code,
-                    error_type=type(error).__name__,
-                    response_text=error.response_text,
-                ) from error
-            raise MarketplaceIntegrationError(
-                "RBXCrate could not create the order",
+            raise MarketplaceIntegrationError("RBXCrate did not accept the order")
+        if used_preorder_fallback:
+            logger.info(
+                "rbxcrate_preorder_created username=%s amount=%s place_id=%s external_order_id=%s",
+                roblox_username,
+                robux_amount,
+                place_id,
+                response.data.order_id,
+            )
+        return MarketplaceCreateResult(
+            external_order_id=response.data.order_id,
+            status=map_marketplace_status(response.data.status),
+            is_preorder=used_preorder_fallback,
+        )
+
+    async def _create_gamepass_order_request(
+        self,
+        *,
+        roblox_username: str,
+        order_id: str,
+        robux_amount: int,
+        place_id: int,
+        gamepass_id: int | None,
+        is_preorder: bool,
+    ) -> CreateGamepassOrderResponse:
+        return await self._gateway.create_gamepass_order(
+            roblox_username=roblox_username,
+            order_id=order_id,
+            robux_amount=robux_amount,
+            gamepass_id=gamepass_id,
+            place_id=place_id,
+            is_preorder=is_preorder,
+            check_ownership=True,
+        )
+
+    @staticmethod
+    def _raise_create_error(
+        error: RbxcrateError,
+        *,
+        roblox_username: str,
+        robux_amount: int,
+        place_id: int,
+        gamepass_id: int | None,
+    ) -> NoReturn:
+        logger.error(
+            "rbxcrate_quick_order_failed username=%s amount=%s place_id=%s "
+            "gamepass_id=%s status=%s body=%s",
+            roblox_username,
+            robux_amount,
+            place_id,
+            gamepass_id,
+            error.status_code,
+            error.response_text or str(error),
+        )
+        if error.status_code == 404 and place_id is not None and gamepass_id is None:
+            raise MarketplaceGamepassNotFoundError(
+                GAMEPASS_NOT_FOUND_MESSAGE,
                 status_code=error.status_code,
                 error_type=type(error).__name__,
                 response_text=error.response_text,
             ) from error
-        if not response.success:
-            raise MarketplaceIntegrationError("RBXCrate did not accept the order")
-        return MarketplaceCreateResult(
-            external_order_id=response.data.order_id,
-            status=map_marketplace_status(response.data.status),
-        )
+        raise MarketplaceIntegrationError(
+            "RBXCrate could not create the order",
+            status_code=error.status_code,
+            error_type=type(error).__name__,
+            response_text=error.response_text,
+        ) from error
 
     async def get_order_info(self, external_order_id: str) -> MarketplaceSyncResult:
         try:
