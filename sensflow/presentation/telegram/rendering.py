@@ -2,7 +2,7 @@
 
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 
 from aiogram.exceptions import TelegramBadRequest
@@ -24,6 +24,7 @@ from sensflow.application.dto import (
 from sensflow.domain.enums import ClientOrderStatus, StatisticsPeriod
 from sensflow.presentation.telegram.callbacks import NavigationTarget
 from sensflow.presentation.telegram.formatting import (
+    MOSCOW_TIMEZONE,
     escape_text,
     format_boolean,
     format_datetime,
@@ -170,7 +171,7 @@ def render_current_stock(stock: CurrentStockDTO) -> Screen:
     ]
     total_available = sum(item.total_robux_amount for item in levels_within_limit)
     maximum_instant = max((item.max_instant_order for item in levels_within_limit), default=0)
-    updated = stock.updated_at.astimezone(UTC).strftime("%H:%M:%S UTC")
+    updated = stock.updated_at.astimezone(MOSCOW_TIMEZONE).strftime("%H:%M MSK")
     return Screen(
         text=(
             "<b>📊 Current RBXCrate Stock</b>\n\n"
@@ -274,6 +275,15 @@ def render_order_details(order: OrderDetailDTO) -> Screen:
         )
         or "No timeline events."
     )
+    preferred_details = (
+        "⚡ Preferred: disabled\n🚀 Immediate execution allowed\n"
+        if not order.preferred_mode_enabled
+        else (
+            f"Preferred rate: {format_decimal(order.preferred_rate)}\n"
+            f"Preferred timeout: {order.preferred_timeout_minutes or '—'} min\n"
+            f"Fallback active: {format_boolean(order.fallback_active)}\n"
+        )
+    )
     text = (
         "<b>Order Details</b>\n\n"
         f"Customer: {escape_text(order.customer_username)}\n"
@@ -282,9 +292,7 @@ def render_order_details(order: OrderDetailDTO) -> Screen:
         f"Customer receives: {format_robux(order.customer_receives)}\n"
         f"Place ID: <code>{order.current_place_id}</code>\n"
         f"Maximum rate: {format_decimal(order.marketplace_rate_limit)}\n"
-        f"Preferred rate: {format_decimal(order.preferred_rate)}\n"
-        f"Preferred timeout: {order.preferred_timeout_minutes or '—'} min\n"
-        f"Fallback active: {format_boolean(order.fallback_active)}\n"
+        f"{preferred_details}"
         f"Marketplace rate: {format_decimal(order.marketplace_rate)}\n"
         f"Executed rate: {format_decimal(order.executed_rate)}\n"
         f"Marketplace cost: {format_decimal(order.marketplace_cost)}\n"
@@ -302,6 +310,11 @@ def render_order_details(order: OrderDetailDTO) -> Screen:
 
 
 def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Screen:
+    preferred_disabled = (
+        "⚡ Preferred: disabled\n🚀 Immediate execution allowed"
+        if not order.preferred_mode_enabled
+        else None
+    )
     if order.status is ClientOrderStatus.PURCHASING:
         title = "📦 Active Order"
         body = (
@@ -313,6 +326,7 @@ def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Scree
             f"Auto Requeue: {format_boolean(order.automatic_requeue_enabled)}\n"
             f"Requeue attempts: {order.requeue_attempts}\n"
             f"⏱ Created: {_format_card_datetime(order.created_at)}"
+            f"{'' if preferred_disabled is None else f'\n{preferred_disabled}'}"
         )
     elif order.status is ClientOrderStatus.PREORDER:
         title = "⏳ PreOrder"
@@ -321,17 +335,20 @@ def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Scree
             (order.waiting_seconds or 0) // 60,
             order.preferred_timeout_minutes or 0,
         )
-        preferred_status = (
-            "🟠 Preferred timeout expired\n"
-            f"🔓 Fallback active up to {format_decimal(order.marketplace_rate_limit, '$')}"
-            if order.fallback_active
-            else (
+        if preferred_disabled is not None:
+            preferred_status = preferred_disabled
+        elif order.fallback_active:
+            preferred_status = (
+                "🟠 Preferred timeout expired\n"
+                f"🔓 Fallback active up to {format_decimal(order.marketplace_rate_limit, '$')}"
+            )
+        else:
+            preferred_status = (
                 f"🟡 Preferred: {format_decimal(order.preferred_rate, '$')}\n"
                 f"🔒 Max: {format_decimal(order.marketplace_rate_limit, '$')}\n"
                 f"⏳ Waiting: {waited_minutes}"
                 f" / {order.preferred_timeout_minutes or '—'} min"
             )
-        )
         body = (
             f"👤 {escape_text(order.customer_username)}\n"
             f"🛒 {format_robux(order.requested_robux)}\n"
@@ -351,7 +368,7 @@ def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Scree
             f"🎮 <code>{order.current_place_id}</code>\n"
             f"Status: {humanize(order.status)}\n"
             f"Max rate: {format_decimal(order.marketplace_rate_limit, '$')}\n"
-            f"Preferred: {format_decimal(order.preferred_rate, '$')}"
+            f"{preferred_disabled or f'Preferred: {format_decimal(order.preferred_rate, "$")}'}"
         )
     reference = (
         ""
@@ -378,7 +395,7 @@ def _format_duration(seconds: int | None) -> str:
 
 
 def _format_card_datetime(value: datetime) -> str:
-    return value.astimezone(UTC).strftime("%d.%m.%Y %H:%M UTC")
+    return value.astimezone(MOSCOW_TIMEZONE).strftime("%d.%m.%Y %H:%M MSK")
 
 
 def render_similar_order(order: OrderDetailDTO) -> Screen:
@@ -506,12 +523,11 @@ def render_settings(settings: SettingsDTO | None) -> Screen:
     if settings is None:
         body = "System Settings have not been initialized."
     else:
-        categories = (
-            ", ".join(humanize(item) for item in settings.notification_categories) or "None"
-        )
         body = (
             "<b>⚙️ Purchase settings</b>\n"
             f"Max rate: {format_decimal(settings.maximum_purchase_rate, '$')}\n"
+            "Preferred Mode By Default: "
+            f"{'ON' if settings.preferred_mode_default else 'OFF'}\n"
             f"Preferred rate: {format_decimal(settings.preferred_purchase_rate, '$')}\n"
             f"Preferred timeout: {settings.preferred_timeout_minutes} min\n\n"
             "<b>⚙️ Balance alerts</b>\n"
@@ -535,13 +551,13 @@ def render_settings(settings: SettingsDTO | None) -> Screen:
             "How often RBXCrate stock is refreshed for PreOrders.\n"
             f"Current: {settings.marketplace_monitoring_interval_seconds}s\n"
             f"Synchronization interval: {settings.synchronization_interval_seconds}s\n"
-            f"Telegram notifications: {format_boolean(settings.telegram_notifications_enabled)}\n"
-            f"Notification categories: {categories}\n"
-            f"Timezone: {escape_text(settings.application_timezone)}"
+            f"Telegram notifications: {format_boolean(settings.telegram_notifications_enabled)}\n\n"
+            "<b>Notification Categories</b>\n"
+            "Use the inline switches below."
         )
     return Screen(
         text=f"<b>Settings</b>\n\n{body}",
-        reply_markup=settings_keyboard(),
+        reply_markup=settings_keyboard(settings),
     )
 
 

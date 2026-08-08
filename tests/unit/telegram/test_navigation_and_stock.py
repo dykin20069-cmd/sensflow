@@ -91,7 +91,7 @@ def test_stock_rendering_formats_rate_tiers_and_policy() -> None:
     assert "📦 Total within limit: 10,763 R$" in screen.text
     assert "⚡ Best instant order: 427 R$" in screen.text
     assert "🎯 Limit: ≤ 4.5$ | Preferred: ≤ 4.3$" in screen.text
-    assert "🕒 14:54:12 UTC" in screen.text
+    assert "🕒 17:54 MSK" in screen.text
 
 
 def test_stock_rendering_places_cheapest_visible_level_last() -> None:
@@ -171,7 +171,7 @@ def test_stock_rendering_falls_back_to_five_cheapest_levels() -> None:
     assert "Market currently above your viewing threshold." in screen.text
     assert "📦 Total within limit: 0 R$" in screen.text
     assert "⚡ Best instant order: 0 R$" in screen.text
-    assert "🕒 22:19:19 UTC" in screen.text
+    assert "🕒 01:19 MSK" in screen.text
 
 
 def test_active_and_preorder_screens_expose_direct_production_actions() -> None:
@@ -255,7 +255,7 @@ def test_dashboard_reopens_cleanly_and_close_uses_previous_screen_when_known() -
     assert callback_data.target is NavigationTarget.SETTINGS
 
 
-def test_back_returns_place_id_step_to_amount_step() -> None:
+def test_back_returns_place_id_step_to_purchase_mode_step() -> None:
     async def scenario() -> None:
         state = MemoryState()
         state.data = {"username": "builder", "requested_robux": 100}
@@ -264,8 +264,8 @@ def test_back_returns_place_id_step_to_amount_step() -> None:
 
         await back_from_place_id(callback, state)  # type: ignore[arg-type]
 
-        assert state.current == CreateOrderStates.requested_robux
-        assert "Requested Robux amount" in callback.message.edit_text.await_args.args[0]
+        assert state.current == CreateOrderStates.purchase_mode
+        assert "Choose purchase mode" in callback.message.edit_text.await_args.args[0]
 
     asyncio.run(scenario())
 

@@ -16,18 +16,23 @@ def create_draft(
     marketplace_rate_limit: Decimal,
     preferred_rate: Decimal | None = None,
     preferred_timeout_minutes: int | None = None,
+    *,
+    preferred_mode_enabled: bool = True,
 ) -> ClientOrder:
     """Create a structurally valid unpaid Client Order snapshot."""
     _validate_requested_robux(requested_robux)
     _validate_place_id(place_id)
     _validate_positive_decimal(marketplace_rate_limit, "Marketplace rate limit")
-    selected_preferred_rate = preferred_rate or marketplace_rate_limit
-    _validate_positive_decimal(selected_preferred_rate, "Preferred rate")
-    if selected_preferred_rate > marketplace_rate_limit:
-        raise DomainValidationError("Preferred rate must not exceed Marketplace rate limit")
-    selected_timeout = 35 if preferred_timeout_minutes is None else preferred_timeout_minutes
-    if selected_timeout <= 0:
-        raise DomainValidationError("Preferred timeout must be greater than zero")
+    selected_preferred_rate: Decimal | None = None
+    selected_timeout: int | None = None
+    if preferred_mode_enabled:
+        selected_preferred_rate = preferred_rate or marketplace_rate_limit
+        _validate_positive_decimal(selected_preferred_rate, "Preferred rate")
+        if selected_preferred_rate > marketplace_rate_limit:
+            raise DomainValidationError("Preferred rate must not exceed Marketplace rate limit")
+        selected_timeout = 35 if preferred_timeout_minutes is None else preferred_timeout_minutes
+        if selected_timeout <= 0:
+            raise DomainValidationError("Preferred timeout must be greater than zero")
     return ClientOrder(
         customer_id=customer.id,
         requested_robux=requested_robux,
@@ -36,7 +41,7 @@ def create_draft(
         marketplace_rate_limit=marketplace_rate_limit,
         preferred_rate=selected_preferred_rate,
         preferred_timeout_minutes=selected_timeout,
-        fallback_active=False,
+        fallback_active=not preferred_mode_enabled,
     )
 
 

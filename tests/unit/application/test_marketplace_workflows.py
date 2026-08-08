@@ -1,6 +1,7 @@
 """Focused orchestration tests using repositories and an RBXCrate bridge fake."""
 
 import asyncio
+import logging
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -119,6 +120,31 @@ def _attempt(order: ClientOrder) -> MarketplaceOrder:
     )
     attempt.id = uuid4()
     return attempt
+
+
+def _active_then_cancelled(attempt: MarketplaceOrder) -> tuple[MarketplaceSyncResult, ...]:
+    return (
+        MarketplaceSyncResult(
+            attempt.rbxcreate_order_id,
+            MarketplaceOrderStatus.ACTIVE,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        MarketplaceSyncResult(
+            attempt.rbxcreate_order_id,
+            MarketplaceOrderStatus.CANCELLED,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+    )
 
 
 def _wire(
@@ -337,6 +363,33 @@ def test_preferred_rate_defers_then_uses_maximum_after_timeout(monkeypatch: Any)
     asyncio.run(scenario())
 
 
+def test_quick_mode_starts_immediately_above_the_preferred_rate(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.DRAFT)
+        order.requested_robux = 857
+        order.marketplace_rate_limit = Decimal("4.5")
+        order.preferred_rate = None
+        order.preferred_timeout_minutes = None
+        order.fallback_active = True
+        state = _wire(
+            monkeypatch,
+            customer=customer,
+            order=order,
+            maximum_purchase_rate=Decimal("4.5"),
+        )
+        bridge = Bridge(stock=(MarketplaceStock(Decimal("4.5"), 3, 1_000, 2_000),))
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        result = await workflows.start_purchase(order.id)
+
+        assert result.message == "Purchase started via RBXCrate."
+        assert order.current_status is ClientOrderStatus.PURCHASING
+        assert state.saved_marketplace[-1].purchase_rate == Decimal("4.5")
+
+    asyncio.run(scenario())
+
+
 def test_manual_requeue_cancels_and_replaces_active_attempt_atomically(
     monkeypatch: Any,
 ) -> None:
@@ -449,6 +502,144 @@ def test_automatic_requeue_waits_for_configured_five_second_delay(monkeypatch: A
         result = await workflows.automatic_requeue(order.id, bridge.stock)
 
         assert result.message == "Automatic requeue delay has not elapsed."
+        assert bridge.sync_calls == 0
+        assert bridge.cancel_calls == []
+        assert bridge.create_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_fast_trigger_requeues_preferred_order_at_or_below_preferred_rate(
+    monkeypatch: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        order.marketplace_rate_limit = Decimal("4.5")
+        order.preferred_rate = Decimal("4.3")
+        order.preferred_timeout_minutes = 35
+        order.fallback_active = False
+        attempt = _attempt(order)
+        attempt.created_at = NOW
+        state = _wire(
+            monkeypatch,
+            customer=customer,
+            order=order,
+            attempt=attempt,
+            maximum_purchase_rate=Decimal("4.5"),
+        )
+        stock = (MarketplaceStock(Decimal("4.2"), 2, 5_000, 5_000),)
+        bridge = Bridge(stock=stock, sync_results=_active_then_cancelled(attempt))
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        with caplog.at_level(logging.INFO):
+            result = await workflows.fast_requeue(
+                order.id,
+                stock,
+                cooldown_seconds=1,
+            )
+
+        assert result.message == "Marketplace Order requeued by fast stock trigger."
+        assert bridge.cancel_calls == [attempt.rbxcreate_order_id]
+        assert len(bridge.create_calls) == 1
+        assert state.saved_marketplace[-1].purchase_rate == Decimal("4.2")
+        record = next(item for item in caplog.records if item.message == "fast_stock_trigger")
+        assert record.order_id == str(order.id)
+        assert record.detected_rate == "4.2"
+        assert record.previous_marketplace_order == attempt.rbxcreate_order_id
+
+    asyncio.run(scenario())
+
+
+def test_fast_trigger_requeues_quick_order_at_its_maximum_rate(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        order.marketplace_rate_limit = Decimal("4.5")
+        order.preferred_rate = None
+        order.preferred_timeout_minutes = None
+        order.fallback_active = True
+        attempt = _attempt(order)
+        attempt.created_at = NOW
+        state = _wire(
+            monkeypatch,
+            customer=customer,
+            order=order,
+            attempt=attempt,
+            maximum_purchase_rate=Decimal("4.5"),
+        )
+        stock = (MarketplaceStock(Decimal("4.5"), 2, 5_000, 5_000),)
+        bridge = Bridge(stock=stock, sync_results=_active_then_cancelled(attempt))
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        await workflows.fast_requeue(order.id, stock, cooldown_seconds=1)
+
+        assert bridge.cancel_calls == [attempt.rbxcreate_order_id]
+        assert len(bridge.create_calls) == 1
+        assert state.saved_marketplace[-1].purchase_rate == Decimal("4.5")
+
+    asyncio.run(scenario())
+
+
+def test_fast_trigger_retains_active_order_without_eligible_stock(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        order.marketplace_rate_limit = Decimal("4.5")
+        order.preferred_rate = Decimal("4.1")
+        order.fallback_active = False
+        attempt = _attempt(order)
+        _wire(
+            monkeypatch,
+            customer=customer,
+            order=order,
+            attempt=attempt,
+            maximum_purchase_rate=Decimal("4.5"),
+        )
+        stock = (MarketplaceStock(Decimal("4.2"), 2, 5_000, 5_000),)
+        bridge = Bridge(
+            stock=stock,
+            sync_results=(_active_then_cancelled(attempt)[0],),
+        )
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        result = await workflows.fast_requeue(order.id, stock, cooldown_seconds=1)
+
+        assert result.message == "No suitable stock for fast requeue."
+        assert bridge.cancel_calls == []
+        assert bridge.create_calls == []
+        assert bridge.sync_calls == 0
+        assert attempt.marketplace_status is MarketplaceOrderStatus.ACTIVE
+
+    asyncio.run(scenario())
+
+
+def test_fast_trigger_cooldown_blocks_a_second_requeue_within_one_second(
+    monkeypatch: Any,
+) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        order.marketplace_rate_limit = Decimal("4.5")
+        order.preferred_rate = None
+        order.fallback_active = True
+        order.last_requeue_at = NOW - timedelta(milliseconds=500)
+        attempt = _attempt(order)
+        _wire(
+            monkeypatch,
+            customer=customer,
+            order=order,
+            attempt=attempt,
+            maximum_purchase_rate=Decimal("4.5"),
+        )
+        stock = (MarketplaceStock(Decimal("4.2"), 2, 5_000, 5_000),)
+        bridge = Bridge(stock=stock)
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        result = await workflows.fast_requeue(order.id, stock, cooldown_seconds=1)
+
+        assert result.message == "Fast requeue cooldown has not elapsed."
         assert bridge.sync_calls == 0
         assert bridge.cancel_calls == []
         assert bridge.create_calls == []

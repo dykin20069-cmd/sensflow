@@ -27,6 +27,7 @@ def test_load_settings_parses_all_groups(valid_environment: dict[str, str]) -> N
     assert settings.rbxcrate.dry_run is False
     assert settings.marketplace.minimum_purchase_rate == Decimal("0")
     assert settings.marketplace.maximum_purchase_rate == Decimal("1.25")
+    assert settings.marketplace.preferred_mode_default is True
     assert settings.marketplace.preferred_purchase_rate == Decimal("1.10")
     assert settings.marketplace.preferred_timeout_minutes == 35
     assert settings.marketplace.low_balance_threshold == Decimal("10")
@@ -67,11 +68,12 @@ def test_missing_required_configuration_is_reported_without_secret_values(
 
 
 @pytest.mark.unit
-def test_invalid_timezone_is_rejected(valid_environment: dict[str, str]) -> None:
+def test_application_timezone_is_fixed_to_moscow(valid_environment: dict[str, str]) -> None:
     valid_environment["APP_TIMEZONE"] = "Not/A_Timezone"
 
-    with pytest.raises(ConfigurationError, match=r"application\.timezone"):
-        load_settings(valid_environment)
+    settings = load_settings(valid_environment)
+
+    assert settings.application.timezone == "Europe/Moscow"
 
 
 @pytest.mark.unit

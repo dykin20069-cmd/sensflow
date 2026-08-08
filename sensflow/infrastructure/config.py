@@ -34,7 +34,7 @@ class ApplicationSettings(SettingsModel):
     """Process-level application configuration."""
 
     environment: Literal["development", "test", "production"] = "development"
-    timezone: str = "UTC"
+    timezone: str = "Europe/Moscow"
 
     @field_validator("timezone")
     @classmethod
@@ -82,6 +82,7 @@ class MarketplaceSettings(SettingsModel):
 
     minimum_purchase_rate: Decimal = Field(default=Decimal("0"), ge=0)
     maximum_purchase_rate: Decimal = Field(gt=0)
+    preferred_mode_default: bool = True
     preferred_purchase_rate: Decimal = Field(default=Decimal("4.3"), gt=0)
     preferred_timeout_minutes: int = Field(default=35, gt=0)
     low_balance_threshold: Decimal = Field(default=Decimal("10"), ge=0)
@@ -184,7 +185,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     values = {
         "application": {
             "environment": source.get("APP_ENVIRONMENT", "development"),
-            "timezone": source.get("APP_TIMEZONE", "UTC"),
+            "timezone": "Europe/Moscow",
         },
         "logging": {"level": source.get("LOG_LEVEL", "INFO").upper()},
         "database": {"url": source.get("DATABASE_URL")},
@@ -201,6 +202,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         "marketplace": {
             "minimum_purchase_rate": source.get("MIN_PURCHASE_RATE", "0"),
             "maximum_purchase_rate": source.get("MAX_PURCHASE_RATE"),
+            "preferred_mode_default": source.get("PREFERRED_MODE_DEFAULT", "true"),
             "preferred_purchase_rate": source.get("PREFERRED_PURCHASE_RATE"),
             "preferred_timeout_minutes": source.get("PREFERRED_TIMEOUT_MINUTES", "35"),
             "low_balance_threshold": source.get("LOW_BALANCE_THRESHOLD", "10"),

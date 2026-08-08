@@ -145,6 +145,7 @@ class OrderDetailDTO:
     created_at: datetime
     completed_at: datetime | None
     timeline: tuple[TimelineEventDTO, ...]
+    preferred_mode_enabled: bool = True
     preferred_rate: Decimal | None = None
     preferred_timeout_minutes: int | None = None
     preferred_expires_at: datetime | None = None
@@ -244,6 +245,7 @@ class SettingsDTO:
     """Persisted operator-editable System Settings."""
 
     maximum_purchase_rate: Decimal
+    preferred_mode_default: bool
     preferred_purchase_rate: Decimal
     preferred_timeout_minutes: int
     low_balance_threshold: Decimal

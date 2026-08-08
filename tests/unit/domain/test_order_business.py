@@ -89,6 +89,24 @@ def test_preferred_rate_waits_then_activates_the_hard_limit() -> None:
     assert effective_purchase_rate(draft, NOW + timedelta(minutes=35)) == Decimal("4.5")
 
 
+def test_quick_order_disables_preferred_waiting_and_uses_the_hard_limit() -> None:
+    draft = create_draft(
+        customer(),
+        857,
+        200,
+        Decimal("4.5"),
+        preferred_mode_enabled=False,
+    )
+
+    enter_preorder(draft, NOW)
+
+    assert draft.preferred_rate is None
+    assert draft.preferred_timeout_minutes is None
+    assert draft.preferred_expires_at is None
+    assert draft.fallback_active is True
+    assert effective_purchase_rate(draft, NOW) == Decimal("4.5")
+
+
 def test_cancellation_is_terminal_and_preserves_the_order() -> None:
     client_order = order(ClientOrderStatus.PREORDER)
     cancel_order(client_order, NOW)

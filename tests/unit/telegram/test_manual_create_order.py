@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
@@ -19,13 +20,19 @@ from sensflow.application.dto import (
     StockAvailabilityDTO,
 )
 from sensflow.domain.enums import ClientOrderStatus
-from sensflow.presentation.telegram.callbacks import PlaceCallback, PlaceCallbackAction
+from sensflow.presentation.telegram.callbacks import (
+    PlaceCallback,
+    PlaceCallbackAction,
+    PurchaseMode,
+    PurchaseModeCallback,
+)
 from sensflow.presentation.telegram.routers.create_order import (
     create_duplicate_order,
     receive_manual_place_id,
     receive_requested_robux,
     receive_username,
     select_public_place,
+    select_purchase_mode,
     send_to_preorders,
     use_remembered_place,
 )
@@ -115,6 +122,8 @@ def test_manual_create_order_offers_and_creates_preorder_when_stock_is_unavailab
     async def scenario() -> None:
         state = MemoryState()
         orders = MagicMock()
+        settings = MagicMock()
+        settings.get_settings = AsyncMock(return_value=SimpleNamespace(preferred_mode_default=True))
         order_id = uuid4()
         orders.prepare_create_order = AsyncMock(
             return_value=PlaceIDSelectionDTO(
@@ -144,12 +153,29 @@ def test_manual_create_order_offers_and_creates_preorder_when_stock_is_unavailab
         place_message = telegram_message("1234567890")
 
         await receive_username(username_message, state)  # type: ignore[arg-type]
-        await receive_requested_robux(amount_message, state, orders)  # type: ignore[arg-type]
+        await receive_requested_robux(amount_message, state, settings)  # type: ignore[arg-type]
+
+        assert state.current == CreateOrderStates.purchase_mode
+        mode_labels = [
+            button.text
+            for row in amount_message.answer.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        assert "⚡ Quick" in mode_labels
+        assert "⏳ Preferred" in mode_labels
+
+        mode_callback = telegram_callback()
+        await select_purchase_mode(
+            mode_callback,
+            PurchaseModeCallback(mode=PurchaseMode.PREFERRED),
+            state,  # type: ignore[arg-type]
+            orders,
+        )
 
         assert state.current == CreateOrderStates.manual_place_id
-        amount_screen = amount_message.answer.await_args.args[0]
-        assert "No public places found" in amount_screen
-        assert "enter the Roblox Place ID manually" in amount_screen
+        place_screen = mode_callback.message.edit_text.await_args.args[0]
+        assert "No public places found" in place_screen
+        assert "enter the Roblox Place ID manually" in place_screen
 
         await receive_manual_place_id(
             place_message,
@@ -177,6 +203,7 @@ def test_manual_create_order_offers_and_creates_preorder_when_stock_is_unavailab
         assert command.requested_robux == 100
         assert command.place_id == 1_234_567_890
         assert command.operator_id == 42
+        assert command.preferred_mode_enabled is True
         orders.prepare_create_order.assert_awaited_once()
         orders.send_to_preorder.assert_awaited_once()
         orders.get_order.assert_awaited_once()
@@ -284,6 +311,10 @@ def test_public_place_selection_creates_verified_purchase() -> None:
         state = MemoryState()
         order_id = uuid4()
         orders = MagicMock()
+        settings = MagicMock()
+        settings.get_settings = AsyncMock(
+            return_value=SimpleNamespace(preferred_mode_default=False)
+        )
         orders.prepare_create_order = AsyncMock(
             return_value=PlaceIDSelectionDTO(
                 username="VerifiedUser",
@@ -308,15 +339,34 @@ def test_public_place_selection_creates_verified_purchase() -> None:
         orders.start_purchase = AsyncMock(
             return_value=ActionResultDTO(message="Purchase started.", order_id=order_id)
         )
-        orders.get_order = AsyncMock(return_value=purchasing_details(order_id))
+        orders.get_order = AsyncMock(
+            return_value=replace(
+                purchasing_details(order_id),
+                preferred_mode_enabled=False,
+                preferred_rate=None,
+                preferred_timeout_minutes=None,
+                fallback_active=True,
+            )
+        )
 
         await receive_username(telegram_message("verifieduser"), state)  # type: ignore[arg-type]
         amount = telegram_message("100")
-        await receive_requested_robux(amount, state, orders)  # type: ignore[arg-type]
+        await receive_requested_robux(amount, state, settings)  # type: ignore[arg-type]
+
+        assert state.current == CreateOrderStates.purchase_mode
+        mode_callback = telegram_callback()
+        await select_purchase_mode(
+            mode_callback,
+            PurchaseModeCallback(mode=PurchaseMode.QUICK),
+            state,  # type: ignore[arg-type]
+            orders,
+        )
 
         assert state.current == CreateOrderStates.place_selection
-        assert "Public places for VerifiedUser" in amount.answer.await_args.args[0]
-        assert "1.2M visits" in amount.answer.await_args.args[0]
+        assert (
+            "Public places for VerifiedUser" in mode_callback.message.edit_text.await_args.args[0]
+        )
+        assert "1.2M visits" in mode_callback.message.edit_text.await_args.args[0]
 
         callback = telegram_callback()
         await select_public_place(
@@ -331,7 +381,11 @@ def test_public_place_selection_creates_verified_purchase() -> None:
         assert command.roblox_user_id == 42
         assert command.place_id == 1_234_567_890
         assert command.place_name == "My Tycoon"
-        assert "Active Order" in callback.message.edit_text.await_args.args[0]
+        assert command.preferred_mode_enabled is False
+        rendered = callback.message.edit_text.await_args.args[0]
+        assert "Active Order" in rendered
+        assert "⚡ Preferred: disabled" in rendered
+        assert "🚀 Immediate execution allowed" in rendered
 
     asyncio.run(scenario())
 

@@ -1,8 +1,11 @@
 """Safe, consistent formatting helpers for Telegram screens."""
 
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from html import escape
+from zoneinfo import ZoneInfo
+
+MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
 
 _SPECIAL_LABELS = {
     "preorder": "PreOrder",
@@ -32,7 +35,7 @@ def format_decimal(value: Decimal | None, suffix: str = "") -> str:
 def format_datetime(value: datetime | None) -> str:
     if value is None:
         return "—"
-    return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    return value.astimezone(MOSCOW_TIMEZONE).strftime("%Y-%m-%d %H:%M MSK")
 
 
 def format_boolean(value: bool) -> str:

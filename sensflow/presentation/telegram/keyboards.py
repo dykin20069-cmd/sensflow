@@ -14,9 +14,11 @@ from sensflow.application.dto import (
     OrderStatusCountsDTO,
     OrderSummaryDTO,
     PublicPlaceDTO,
+    SettingsDTO,
 )
 from sensflow.domain.enums import ClientOrderStatus, StatisticsPeriod
 from sensflow.presentation.telegram.callbacks import (
+    NOTIFICATION_CATEGORY_TYPES,
     CustomerCallback,
     CustomerCallbackAction,
     MainSection,
@@ -24,12 +26,16 @@ from sensflow.presentation.telegram.callbacks import (
     NavigationAction,
     NavigationCallback,
     NavigationTarget,
+    NotificationCategoryCallback,
+    NotificationCategoryGroup,
     OrderCallback,
     OrderCallbackAction,
     PageCallback,
     PageScope,
     PlaceCallback,
     PlaceCallbackAction,
+    PurchaseMode,
+    PurchaseModeCallback,
     SettingsCallback,
     SettingsCallbackAction,
     StatisticsCallback,
@@ -362,6 +368,25 @@ def place_lookup_fallback_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def purchase_mode_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="⚡ Quick",
+        callback_data=PurchaseModeCallback(mode=PurchaseMode.QUICK),
+    )
+    builder.button(
+        text="⏳ Preferred",
+        callback_data=PurchaseModeCallback(mode=PurchaseMode.PREFERRED),
+    )
+    builder.adjust(1)
+    builder.attach(
+        InlineKeyboardBuilder.from_markup(
+            navigation_keyboard(back_target=NavigationTarget.CREATE_ORDER)
+        )
+    )
+    return builder.as_markup()
+
+
 def no_stock_fallback_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
@@ -432,9 +457,41 @@ def customer_details_keyboard(
     return builder.as_markup()
 
 
-def settings_keyboard() -> InlineKeyboardMarkup:
+def settings_keyboard(settings: SettingsDTO | None) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    if settings is not None:
+        mode_marker = "✅" if settings.preferred_mode_default else "❌"
+        builder.button(
+            text=(
+                f"{mode_marker} Preferred Mode By Default: "
+                f"{'ON' if settings.preferred_mode_default else 'OFF'}"
+            ),
+            callback_data=SettingsCallback(
+                action=SettingsCallbackAction.TOGGLE,
+                field=SettingField.PREFERRED_MODE_DEFAULT,
+            ),
+        )
+        enabled_categories = set(settings.notification_categories)
+        labels = {
+            NotificationCategoryGroup.PURCHASES: "Purchases",
+            NotificationCategoryGroup.STOCK_ALERTS: "Stock Alerts",
+            NotificationCategoryGroup.LOW_BALANCE: "Low Balance",
+            NotificationCategoryGroup.CRITICAL_BALANCE: "Critical Balance",
+            NotificationCategoryGroup.ERRORS: "Errors",
+            NotificationCategoryGroup.ORDER_STATUS: "Order Status",
+        }
+        for category, notification_types in NOTIFICATION_CATEGORY_TYPES.items():
+            marker = "✅" if notification_types <= enabled_categories else "❌"
+            builder.button(
+                text=f"{marker} {labels[category]}",
+                callback_data=NotificationCategoryCallback(category=category),
+            )
     for field in SettingField:
+        if field in {
+            SettingField.PREFERRED_MODE_DEFAULT,
+            SettingField.NOTIFICATION_CATEGORIES,
+        }:
+            continue
         builder.button(
             text=humanize(field),
             callback_data=SettingsCallback(action=SettingsCallbackAction.EDIT, field=field),

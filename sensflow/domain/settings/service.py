@@ -29,12 +29,14 @@ class SettingsDefaults:
     low_balance_threshold: Decimal = Decimal("10")
     critical_balance_threshold: Decimal = Decimal("5")
     stock_notifications_enabled: bool = True
+    preferred_mode_default: bool = True
 
 
 def create_settings(defaults: SettingsDefaults) -> SystemSettings:
     """Create the one persistent settings row from validated process defaults."""
     settings = SystemSettings(
         maximum_purchase_rate=defaults.maximum_purchase_rate,
+        preferred_mode_default=defaults.preferred_mode_default,
         preferred_purchase_rate=(
             min(defaults.maximum_purchase_rate, Decimal("4.3"))
             if defaults.preferred_purchase_rate is None
@@ -125,6 +127,7 @@ def _parse_setting(field: SettingField, raw_value: str) -> object:
         SettingField.AUTOMATIC_REORDER_ENABLED,
         SettingField.TELEGRAM_NOTIFICATIONS_ENABLED,
         SettingField.STOCK_NOTIFICATIONS_ENABLED,
+        SettingField.PREFERRED_MODE_DEFAULT,
     }:
         normalized = value.casefold()
         if normalized in {"true", "yes", "1", "on"}:
@@ -145,9 +148,6 @@ def _parse_setting(field: SettingField, raw_value: str) -> object:
             raise DomainValidationError(
                 "Notification categories contain an unknown value"
             ) from error
-    if field is SettingField.APPLICATION_TIMEZONE:
-        _timezone(value)
-        return value
     raise DomainValidationError("Setting field is not supported")
 
 

@@ -6,7 +6,7 @@ from uuid import UUID
 from aiogram.filters.callback_data import CallbackData
 
 from sensflow.application.commands import SettingField
-from sensflow.domain.enums import ClientOrderStatus, StatisticsPeriod
+from sensflow.domain.enums import ClientOrderStatus, NotificationType, StatisticsPeriod
 
 
 class MainSection(StrEnum):
@@ -71,6 +71,46 @@ class PlaceCallbackAction(StrEnum):
     RETRY_STOCK = "retry_stock"
 
 
+class PurchaseMode(StrEnum):
+    QUICK = "quick"
+    PREFERRED = "preferred"
+
+
+class NotificationCategoryGroup(StrEnum):
+    PURCHASES = "purchases"
+    STOCK_ALERTS = "stock"
+    LOW_BALANCE = "low_balance"
+    CRITICAL_BALANCE = "critical_balance"
+    ERRORS = "errors"
+    ORDER_STATUS = "order_status"
+
+
+NOTIFICATION_CATEGORY_TYPES: dict[NotificationCategoryGroup, frozenset[NotificationType]] = {
+    NotificationCategoryGroup.PURCHASES: frozenset({NotificationType.PURCHASE_COMPLETED}),
+    NotificationCategoryGroup.STOCK_ALERTS: frozenset({NotificationType.STOCK_AVAILABLE}),
+    NotificationCategoryGroup.LOW_BALANCE: frozenset({NotificationType.LOW_BALANCE}),
+    NotificationCategoryGroup.CRITICAL_BALANCE: frozenset({NotificationType.CRITICAL_BALANCE}),
+    NotificationCategoryGroup.ERRORS: frozenset(
+        {
+            NotificationType.AUTO_REQUEUE_FAILED,
+            NotificationType.MARKETPLACE_ERROR,
+            NotificationType.SYNCHRONIZATION_FAILED,
+        }
+    ),
+    NotificationCategoryGroup.ORDER_STATUS: frozenset(
+        {
+            NotificationType.AUTO_REQUEUE_STARTED,
+            NotificationType.AUTO_REQUEUE_COMPLETED,
+            NotificationType.APPLICATION_RESTARTED,
+            NotificationType.APPLICATION_RECOVERED,
+            NotificationType.AUTOMATIC_REORDER,
+            NotificationType.MANUAL_REORDER,
+            NotificationType.ORDER_CANCELLED,
+        }
+    ),
+}
+
+
 class CustomerCallbackAction(StrEnum):
     DETAILS = "details"
     REFRESH = "refresh"
@@ -80,6 +120,7 @@ class CustomerCallbackAction(StrEnum):
 
 class SettingsCallbackAction(StrEnum):
     EDIT = "edit"
+    TOGGLE = "toggle"
 
 
 class SystemCallbackAction(StrEnum):
@@ -112,6 +153,10 @@ class PlaceCallback(CallbackData, prefix="pl"):
     index: int = -1
 
 
+class PurchaseModeCallback(CallbackData, prefix="pm"):
+    mode: PurchaseMode
+
+
 class CustomerCallback(CallbackData, prefix="c"):
     action: CustomerCallbackAction
     customer_id: UUID
@@ -120,6 +165,10 @@ class CustomerCallback(CallbackData, prefix="c"):
 class SettingsCallback(CallbackData, prefix="s"):
     action: SettingsCallbackAction
     field: SettingField
+
+
+class NotificationCategoryCallback(CallbackData, prefix="nc"):
+    category: NotificationCategoryGroup
 
 
 class StatisticsCallback(CallbackData, prefix="st"):

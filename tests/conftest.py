@@ -8,7 +8,7 @@ def valid_environment() -> dict[str, str]:
     """Return a complete, valid test environment."""
     return {
         "APP_ENVIRONMENT": "test",
-        "APP_TIMEZONE": "Europe/Moscow",
+        "PREFERRED_MODE_DEFAULT": "true",
         "LOG_LEVEL": "warning",
         "DATABASE_URL": "postgresql+asyncpg://user:database-secret@localhost:5432/sensflow",
         "TELEGRAM_BOT_TOKEN": "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",

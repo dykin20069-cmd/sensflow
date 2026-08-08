@@ -142,16 +142,29 @@ class MarketplaceWorkflows:
             updated_at=self._clock(),
         )
 
-    async def check_stock(self, requested_robux: int) -> StockAvailabilityDTO:
+    async def check_stock(
+        self,
+        requested_robux: int,
+        preferred_mode_enabled: bool | None = None,
+    ) -> StockAvailabilityDTO:
         """Check one amount against one live snapshot and the persisted rate policy."""
         async with self._sessions.begin() as session:
             settings = await self._get_settings(session)
             stock = await self._bridge.get_detailed_stock()
+        use_preferred = (
+            settings.preferred_mode_default is not False
+            if preferred_mode_enabled is None
+            else preferred_mode_enabled
+        )
         selected = _select_stock(
             stock,
             requested_robux=requested_robux,
             minimum_purchase_rate=self._minimum_purchase_rate,
-            maximum_purchase_rate=settings.preferred_purchase_rate,
+            maximum_purchase_rate=(
+                settings.preferred_purchase_rate
+                if use_preferred
+                else settings.maximum_purchase_rate
+            ),
         )
         return StockAvailabilityDTO(
             available=selected is not None,
@@ -444,7 +457,28 @@ class MarketplaceWorkflows:
         stock: tuple[MarketplaceStock, ...],
     ) -> ActionResultDTO:
         """Replace one active attempt using the loop's consistent stock snapshot."""
-        return await self._requeue_active(order_id, stock=stock, automatic=True)
+        return await self._requeue_active(
+            order_id,
+            stock=stock,
+            automatic=True,
+            fast=False,
+        )
+
+    async def fast_requeue(
+        self,
+        order_id: UUID,
+        stock: tuple[MarketplaceStock, ...],
+        *,
+        cooldown_seconds: float,
+    ) -> ActionResultDTO:
+        """Immediately replace an active attempt when its effective rate has stock."""
+        return await self._requeue_active(
+            order_id,
+            stock=stock,
+            automatic=True,
+            fast=True,
+            cooldown_seconds=cooldown_seconds,
+        )
 
     async def _requeue_active(
         self,
@@ -452,6 +486,8 @@ class MarketplaceWorkflows:
         *,
         stock: tuple[MarketplaceStock, ...] | None,
         automatic: bool,
+        fast: bool = False,
+        cooldown_seconds: float = 0,
     ) -> ActionResultDTO:
         """Check, cancel, confirm, and replace one attempt under database row locks."""
         try:
@@ -484,10 +520,35 @@ class MarketplaceWorkflows:
                 requeue_anchor = order.last_requeue_at or active.created_at
                 if (
                     automatic
+                    and not fast
                     and requeue_anchor is not None
                     and now - requeue_anchor < timedelta(seconds=float(delay))
                 ):
                     return ActionResultDTO(message="Automatic requeue delay has not elapsed.")
+                if (
+                    fast
+                    and order.last_requeue_at is not None
+                    and now - order.last_requeue_at < timedelta(seconds=cooldown_seconds)
+                ):
+                    return ActionResultDTO(message="Fast requeue cooldown has not elapsed.")
+
+                current_stock = (
+                    await self._bridge.get_detailed_stock()
+                    if fast and stock is None
+                    else stock or ()
+                )
+                selected = (
+                    _select_stock(
+                        current_stock,
+                        requested_robux=order.requested_robux,
+                        minimum_purchase_rate=self._minimum_purchase_rate,
+                        maximum_purchase_rate=effective_purchase_rate(order, now),
+                    )
+                    if fast
+                    else None
+                )
+                if fast and selected is None:
+                    return ActionResultDTO(message="No suitable stock for fast requeue.")
 
                 customer = await CustomerRepository(session).get(order.customer_id)
                 if customer is None:
@@ -503,13 +564,16 @@ class MarketplaceWorkflows:
                         initial_status,
                     )
 
-                current_stock = await self._bridge.get_detailed_stock() if stock is None else stock
-                selected = _select_stock(
-                    current_stock,
-                    requested_robux=order.requested_robux,
-                    minimum_purchase_rate=self._minimum_purchase_rate,
-                    maximum_purchase_rate=order.marketplace_rate_limit,
-                )
+                if selected is None:
+                    current_stock = (
+                        await self._bridge.get_detailed_stock() if stock is None else stock
+                    )
+                    selected = _select_stock(
+                        current_stock,
+                        requested_robux=order.requested_robux,
+                        minimum_purchase_rate=self._minimum_purchase_rate,
+                        maximum_purchase_rate=order.marketplace_rate_limit,
+                    )
                 if selected is None:
                     message = (
                         "No suitable stock for automatic requeue."
@@ -518,8 +582,18 @@ class MarketplaceWorkflows:
                     )
                     return ActionResultDTO(message=message)
 
+                if fast:
+                    logger.info(
+                        "fast_stock_trigger",
+                        extra={
+                            "order_id": str(order.id),
+                            "detected_rate": str(selected.rate),
+                            "previous_marketplace_order": active.rbxcreate_order_id,
+                        },
+                    )
+
                 attempt_number = (order.requeue_attempts or 0) + 2
-                if automatic:
+                if automatic and not fast:
                     logger.info(
                         "auto_requeue_started",
                         extra={
@@ -629,9 +703,13 @@ class MarketplaceWorkflows:
                         requeue_time + timedelta(microseconds=2),
                     )
                 )
-                if automatic and _notification_enabled(
-                    settings,
-                    NotificationType.AUTO_REQUEUE_COMPLETED,
+                if (
+                    automatic
+                    and not fast
+                    and _notification_enabled(
+                        settings,
+                        NotificationType.AUTO_REQUEUE_COMPLETED,
+                    )
                 ):
                     await NotificationRepository(session).save(
                         Notification(
@@ -647,7 +725,7 @@ class MarketplaceWorkflows:
                             delivery_status=NotificationDeliveryStatus.PENDING,
                         )
                     )
-                if automatic:
+                if automatic and not fast:
                     logger.info(
                         "auto_requeue_completed",
                         extra={
@@ -667,7 +745,9 @@ class MarketplaceWorkflows:
             raise ConflictError("The order changed concurrently; please refresh") from error
         return ActionResultDTO(
             message=(
-                "Marketplace Order automatically requeued."
+                "Marketplace Order requeued by fast stock trigger."
+                if fast
+                else "Marketplace Order automatically requeued."
                 if automatic
                 else "Active Marketplace Order was requeued."
             )

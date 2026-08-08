@@ -29,6 +29,7 @@ class PrepareCreateOrderCommand(Command):
 
     username: Username
     requested_robux: int = Field(gt=0)
+    preferred_mode_enabled: bool | None = None
 
 
 class CreateOrderCommand(PrepareCreateOrderCommand):
@@ -48,6 +49,8 @@ class CreateOrderCommand(PrepareCreateOrderCommand):
 
     @model_validator(mode="after")
     def validate_rate_policy(self) -> "CreateOrderCommand":
+        if self.preferred_mode_enabled is False and self.preferred_rate is not None:
+            raise ValueError("preferred rate requires preferred mode")
         if (
             self.maximum_rate is not None
             and self.preferred_rate is not None
@@ -115,4 +118,4 @@ class UpdateSettingCommand(OperatorCommand):
     """Raw operator setting change awaiting business validation."""
 
     field: SettingField
-    value: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
+    value: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1024)]

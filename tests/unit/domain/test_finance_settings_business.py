@@ -102,6 +102,7 @@ def test_settings_service_parses_every_value_shape_and_rejects_invalid_values() 
     settings = create_settings(defaults())
 
     update_setting(settings, SettingField.MAXIMUM_PURCHASE_RATE, "1.50")
+    update_setting(settings, SettingField.PREFERRED_MODE_DEFAULT, "off")
     update_setting(settings, SettingField.PREFERRED_PURCHASE_RATE, "1.10")
     update_setting(settings, SettingField.PREFERRED_TIMEOUT_MINUTES, "35")
     update_setting(settings, SettingField.LOW_BALANCE_THRESHOLD, "12")
@@ -116,9 +117,9 @@ def test_settings_service_parses_every_value_shape_and_rejects_invalid_values() 
         SettingField.NOTIFICATION_CATEGORIES,
         "purchase_completed, order_cancelled",
     )
-    update_setting(settings, SettingField.APPLICATION_TIMEZONE, "Europe/Moscow")
 
     assert settings.maximum_purchase_rate == Decimal("1.50")
+    assert settings.preferred_mode_default is False
     assert settings.preferred_purchase_rate == Decimal("1.10")
     assert settings.preferred_timeout_minutes == 35
     assert settings.low_balance_threshold == Decimal("12")
@@ -132,7 +133,7 @@ def test_settings_service_parses_every_value_shape_and_rejects_invalid_values() 
         NotificationType.PURCHASE_COMPLETED,
         NotificationType.ORDER_CANCELLED,
     ]
-    assert settings.application_timezone == "Europe/Moscow"
+    assert settings.application_timezone == "UTC"
 
     with pytest.raises(DomainValidationError):
         update_setting(settings, SettingField.USD_EXCHANGE_RATE, "0")

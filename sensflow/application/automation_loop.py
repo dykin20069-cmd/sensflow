@@ -35,6 +35,7 @@ BALANCE_NOTIFICATION_COOLDOWN_SECONDS = 60 * 60
 STOCK_NOTIFICATION_INTERVAL_SECONDS = 15
 STOCK_NOTIFICATION_COOLDOWN_SECONDS = 10 * 60
 STOCK_NOTIFICATION_GROWTH_FACTOR = Decimal("1.20")
+FAST_REQUEUE_COOLDOWN_SECONDS = 1
 Clock = Callable[[], datetime]
 
 
@@ -127,6 +128,7 @@ class AutomationLoop:
         await self._run_stock_pass(
             process_preorders=True,
             process_active=True,
+            process_fast_triggers=True,
             process_notifications=True,
         )
 
@@ -166,6 +168,7 @@ class AutomationLoop:
         *,
         process_preorders: bool,
         process_active: bool,
+        process_fast_triggers: bool = False,
         process_notifications: bool = True,
     ) -> None:
         """Use one stock snapshot for whichever automation schedules are due."""
@@ -184,7 +187,7 @@ class AutomationLoop:
                     ClientOrderStatus.PURCHASING,
                     limit=10_000,
                 )
-                if process_active
+                if process_active or process_fast_triggers
                 else []
             )
         now = self._clock()
@@ -196,6 +199,27 @@ class AutomationLoop:
         settings = await self._get_settings()
         if process_notifications:
             await self._queue_stock_notifications(plan, settings, now)
+        for order in active_orders if process_fast_triggers else ():
+            try:
+                await self._workflows.fast_requeue(
+                    order.id,
+                    plan.stock,
+                    cooldown_seconds=FAST_REQUEUE_COOLDOWN_SECONDS,
+                )
+            except Exception as error:
+                logger.exception(
+                    "fast_stock_trigger_failed",
+                    extra={"order_id": str(order.id)},
+                )
+                await self._queue_marketplace_error(
+                    order.id,
+                    "fast_requeue",
+                    error,
+                    enabled=(
+                        settings.telegram_notifications_enabled
+                        and NotificationType.MARKETPLACE_ERROR in settings.notification_categories
+                    ),
+                )
         for order_id in plan.order_ids if process_preorders else ():
             try:
                 await self._workflows.start_purchase(order_id)
@@ -354,6 +378,7 @@ class AutomationLoop:
                     await self._run_stock_pass(
                         process_preorders=(monitoring_due and settings.automatic_reorder_enabled),
                         process_active=requeue_due and settings.automatic_reorder_enabled,
+                        process_fast_triggers=settings.automatic_reorder_enabled,
                         process_notifications=stock_notification_due,
                     )
                     scheduled_at = loop.time()

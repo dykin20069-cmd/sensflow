@@ -187,6 +187,7 @@ def test_settings_and_statistics_services_only_read_persisted_projections() -> N
         settings_row = SystemSettings(
             id=uuid4(),
             maximum_purchase_rate=Decimal("1.25"),
+            preferred_mode_default=True,
             preferred_purchase_rate=Decimal("1.00"),
             preferred_timeout_minutes=35,
             low_balance_threshold=Decimal("10"),

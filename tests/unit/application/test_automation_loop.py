@@ -10,7 +10,11 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import sensflow.application.automation_loop as loop_module
-from sensflow.application.automation_loop import AutomationLoop, _stock_appeared_message
+from sensflow.application.automation_loop import (
+    FAST_REQUEUE_COOLDOWN_SECONDS,
+    AutomationLoop,
+    _stock_appeared_message,
+)
 from sensflow.application.marketplace_workflows import AutomationStockPlan
 from sensflow.application.rbxcreate_bridge import MarketplaceStock
 from sensflow.domain.enums import ClientOrderStatus, NotificationType
@@ -193,6 +197,7 @@ def test_reorder_pass_uses_one_stock_plan_for_preorders_and_active_orders(
             )
         )
         workflows.start_purchase = AsyncMock()
+        workflows.fast_requeue = AsyncMock()
         workflows.automatic_requeue = AsyncMock()
         notifications = MagicMock()
         notifications.queue = AsyncMock()
@@ -207,6 +212,11 @@ def test_reorder_pass_uses_one_stock_plan_for_preorders_and_active_orders(
 
         workflows.plan_automation.assert_awaited_once()
         workflows.start_purchase.assert_awaited_once_with(preorder_id)
+        workflows.fast_requeue.assert_awaited_once_with(
+            active_id,
+            (stock,),
+            cooldown_seconds=FAST_REQUEUE_COOLDOWN_SECONDS,
+        )
         workflows.automatic_requeue.assert_awaited_once_with(active_id, (stock,))
         notifications.queue.assert_awaited_once()
         notifications.deliver_pending.assert_awaited_once()
@@ -218,6 +228,16 @@ def test_reorder_pass_uses_one_stock_plan_for_preorders_and_active_orders(
 
         assert workflows.plan_automation.await_args.args[0] == ()
         assert workflows.start_purchase.await_count == 1
+        assert workflows.fast_requeue.await_count == 1
+        assert workflows.automatic_requeue.await_count == 2
+
+        await automation._run_stock_pass(
+            process_preorders=False,
+            process_active=False,
+            process_fast_triggers=True,
+        )
+
+        assert workflows.fast_requeue.await_count == 2
         assert workflows.automatic_requeue.await_count == 2
 
     asyncio.run(scenario())

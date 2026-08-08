@@ -574,6 +574,12 @@ class SystemSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         default=Decimal("4.3"),
         server_default=text("4.3"),
     )
+    preferred_mode_default: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
     preferred_timeout_minutes: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

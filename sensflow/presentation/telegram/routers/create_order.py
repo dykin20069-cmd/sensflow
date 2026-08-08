@@ -16,7 +16,7 @@ from sensflow.application.errors import (
     InputValidationError,
     RobloxIntegrationError,
 )
-from sensflow.application.ports import OrderUseCases
+from sensflow.application.ports import OrderUseCases, SettingsUseCases
 from sensflow.application.queries import FindSimilarOrderQuery, GetOrderQuery
 from sensflow.application.validation import (
     validate_input,
@@ -33,10 +33,12 @@ from sensflow.presentation.telegram.callbacks import (
     OrderCallbackAction,
     PlaceCallback,
     PlaceCallbackAction,
+    PurchaseMode,
+    PurchaseModeCallback,
 )
 from sensflow.presentation.telegram.errors import show_error
 from sensflow.presentation.telegram.formatting import escape_text
-from sensflow.presentation.telegram.keyboards import navigation_keyboard
+from sensflow.presentation.telegram.keyboards import navigation_keyboard, purchase_mode_keyboard
 from sensflow.presentation.telegram.rendering import (
     Screen,
     render_main_menu,
@@ -79,6 +81,19 @@ def _place_id_prompt() -> Screen:
     )
 
 
+def _purchase_mode_prompt(default_preferred: bool) -> Screen:
+    default_mode = "Preferred" if default_preferred else "Quick"
+    return Screen(
+        text=(
+            "<b>Choose purchase mode</b>\n\n"
+            "⚡ Quick — execute immediately at any rate within Max.\n"
+            "⏳ Preferred — wait for Preferred Rate, then fall back to Max.\n\n"
+            f"Global default: <b>{default_mode}</b>"
+        ),
+        reply_markup=purchase_mode_keyboard(),
+    )
+
+
 @router.callback_query(MenuCallback.filter(F.section == MainSection.CREATE_ORDER))
 async def begin_create_order(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
@@ -109,7 +124,7 @@ async def receive_username(message: Message, state: FSMContext) -> None:
 async def receive_requested_robux(
     message: Message,
     state: FSMContext,
-    orders: OrderUseCases,
+    settings: SettingsUseCases,
 ) -> None:
     data = await state.get_data()
     try:
@@ -125,7 +140,42 @@ async def receive_requested_robux(
         username=command.username,
         requested_robux=command.requested_robux,
     )
-    await _load_place_selection(message, state, orders, command, refresh=False)
+    current_settings = await settings.get_settings()
+    preferred_mode_default = (
+        True if current_settings is None else current_settings.preferred_mode_default
+    )
+    await state.update_data(preferred_mode_default=preferred_mode_default)
+    await state.set_state(CreateOrderStates.purchase_mode)
+    await show_screen(
+        message,
+        _purchase_mode_prompt(preferred_mode_default),
+    )
+
+
+@router.callback_query(CreateOrderStates.purchase_mode, PurchaseModeCallback.filter())
+async def select_purchase_mode(
+    callback: CallbackQuery,
+    callback_data: PurchaseModeCallback,
+    state: FSMContext,
+    orders: OrderUseCases,
+) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    preferred_mode_enabled = callback_data.mode is PurchaseMode.PREFERRED
+    try:
+        command = validate_input(
+            PrepareCreateOrderCommand,
+            {
+                "username": data.get("username"),
+                "requested_robux": data.get("requested_robux"),
+                "preferred_mode_enabled": preferred_mode_enabled,
+            },
+        )
+    except ApplicationError as error:
+        await show_error(callback, error)
+        return
+    await state.update_data(preferred_mode_enabled=preferred_mode_enabled)
+    await _load_place_selection(callback, state, orders, command, refresh=False)
 
 
 async def _load_place_selection(
@@ -222,6 +272,17 @@ async def back_from_amount(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(
+    CreateOrderStates.purchase_mode,
+    NavigationCallback.filter(F.action == NavigationAction.BACK),
+)
+async def back_from_purchase_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    await state.set_state(CreateOrderStates.requested_robux)
+    await show_screen(callback, _amount_prompt(str(data.get("username", ""))))
+
+
+@router.callback_query(
     CreateOrderStates.place_selection,
     NavigationCallback.filter(F.action == NavigationAction.BACK),
 )
@@ -232,9 +293,11 @@ async def back_from_amount(callback: CallbackQuery, state: FSMContext) -> None:
 async def back_from_place_id(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     data = await state.get_data()
-    username = str(data.get("username", ""))
-    await state.set_state(CreateOrderStates.requested_robux)
-    await show_screen(callback, _amount_prompt(username))
+    await state.set_state(CreateOrderStates.purchase_mode)
+    await show_screen(
+        callback,
+        _purchase_mode_prompt(bool(data.get("preferred_mode_default", True))),
+    )
 
 
 @router.callback_query(
@@ -266,6 +329,7 @@ async def refresh_public_places(
             {
                 "username": data.get("username"),
                 "requested_robux": data.get("requested_robux"),
+                "preferred_mode_enabled": data.get("preferred_mode_enabled"),
             },
         )
     except ApplicationError as error:
@@ -426,6 +490,7 @@ async def _check_stock(
             {
                 "username": data.get("username"),
                 "requested_robux": data.get("requested_robux"),
+                "preferred_mode_enabled": data.get("preferred_mode_enabled"),
             },
         )
         availability = await orders.check_stock(command)
@@ -472,6 +537,7 @@ async def _create_and_route(
                 "roblox_user_id": data.get("roblox_user_id"),
                 "operator_id": event.from_user.id,
                 "allow_duplicate": allow_duplicate,
+                "preferred_mode_enabled": data.get("preferred_mode_enabled"),
             },
         )
         result = await orders.create_order(command)

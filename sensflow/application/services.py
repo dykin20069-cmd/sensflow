@@ -243,6 +243,7 @@ def _order_detail(
         ),
         current_place_id=order.current_place_id,
         marketplace_rate_limit=order.marketplace_rate_limit,
+        preferred_mode_enabled=order.preferred_rate is not None,
         preferred_rate=order.preferred_rate,
         preferred_timeout_minutes=order.preferred_timeout_minutes,
         preferred_expires_at=order.preferred_expires_at,
@@ -320,6 +321,7 @@ def _customer_detail(customer: Customer) -> CustomerDetailDTO:
 def _settings(settings: SystemSettings) -> SettingsDTO:
     return SettingsDTO(
         maximum_purchase_rate=settings.maximum_purchase_rate,
+        preferred_mode_default=settings.preferred_mode_default is not False,
         preferred_purchase_rate=settings.preferred_purchase_rate,
         preferred_timeout_minutes=settings.preferred_timeout_minutes,
         low_balance_threshold=settings.low_balance_threshold,
@@ -487,7 +489,10 @@ class OrderApplicationService:
     ) -> StockAvailabilityDTO:
         if self._marketplace_workflows is None:
             raise FeatureUnavailableError("Marketplace stock lookup")
-        return await self._marketplace_workflows.check_stock(command.requested_robux)
+        return await self._marketplace_workflows.check_stock(
+            command.requested_robux,
+            command.preferred_mode_enabled,
+        )
 
     async def get_timeline(self, query: GetOrderQuery) -> tuple[TimelineEventDTO, ...]:
         return (await self.get_order(query)).timeline
@@ -607,9 +612,15 @@ class OrderApplicationService:
                 if similar is not None:
                     raise ConflictError(f"Similar active order {similar.id} already exists")
             maximum_rate = command.maximum_rate or settings.maximum_purchase_rate
-            preferred_rate = command.preferred_rate or min(
-                settings.preferred_purchase_rate,
-                maximum_rate,
+            preferred_mode_enabled = (
+                settings.preferred_mode_default is not False
+                if command.preferred_mode_enabled is None
+                else command.preferred_mode_enabled
+            )
+            preferred_rate = (
+                command.preferred_rate or min(settings.preferred_purchase_rate, maximum_rate)
+                if preferred_mode_enabled
+                else None
             )
             order = await orders.save(
                 create_draft(
@@ -618,7 +629,12 @@ class OrderApplicationService:
                     command.place_id,
                     maximum_rate,
                     preferred_rate,
-                    command.preferred_timeout_minutes or settings.preferred_timeout_minutes,
+                    (
+                        command.preferred_timeout_minutes or settings.preferred_timeout_minutes
+                        if preferred_mode_enabled
+                        else None
+                    ),
+                    preferred_mode_enabled=preferred_mode_enabled,
                 )
             )
             await TimelineEventRepository(session).save(

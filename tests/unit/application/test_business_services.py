@@ -77,10 +77,11 @@ def draft() -> ClientOrder:
     )
 
 
-def settings_row() -> SystemSettings:
+def settings_row(*, preferred_mode_default: bool = True) -> SystemSettings:
     return SystemSettings(
         id=uuid4(),
         maximum_purchase_rate=Decimal("1.25"),
+        preferred_mode_default=preferred_mode_default,
         preferred_purchase_rate=Decimal("1.00"),
         preferred_timeout_minutes=35,
         low_balance_threshold=Decimal("10"),
@@ -213,7 +214,14 @@ def test_operator_can_disable_auto_requeue_for_one_active_order() -> None:
     asyncio.run(exercise())
 
 
-def test_create_order_persists_manual_customer_and_draft_without_roblox_lookup() -> None:
+@pytest.mark.parametrize(
+    ("preferred_mode_default", "expected_preferred_rate"),
+    ((True, Decimal("1.00")), (False, None)),
+)
+def test_create_order_uses_the_global_default_purchase_mode(
+    preferred_mode_default: bool,
+    expected_preferred_rate: Decimal | None,
+) -> None:
     async def exercise() -> None:
         customer_id = uuid4()
         order_id = uuid4()
@@ -234,7 +242,9 @@ def test_create_order_persists_manual_customer_and_draft_without_roblox_lookup()
 
         orders.save = AsyncMock(side_effect=save_order)
         settings = MagicMock()
-        settings.get_current = AsyncMock(return_value=settings_row())
+        settings.get_current = AsyncMock(
+            return_value=settings_row(preferred_mode_default=preferred_mode_default)
+        )
         timeline = MagicMock()
         timeline.save = AsyncMock(side_effect=lambda value: value)
         place_cache = MagicMock()
@@ -280,8 +290,9 @@ def test_create_order_persists_manual_customer_and_draft_without_roblox_lookup()
         assert created.customer_id == customer_id
         assert created.current_status is ClientOrderStatus.DRAFT
         assert created.marketplace_rate_limit == Decimal("1.25")
-        assert created.preferred_rate == Decimal("1.00")
-        assert created.preferred_timeout_minutes == 35
+        assert created.preferred_rate == expected_preferred_rate
+        assert created.preferred_timeout_minutes == (35 if preferred_mode_default else None)
+        assert created.fallback_active is not preferred_mode_default
         assert event.event_type is TimelineEventType.ORDER_CREATED
         assert str(order_id) in result.message
         assert result.order_id == order_id
