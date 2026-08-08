@@ -46,10 +46,16 @@ class MarketplaceIntegrationError(ApplicationError):
         *,
         status_code: int | None = None,
         error_type: str | None = None,
+        response_text: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_type = error_type
+        self.response_text = response_text
+
+
+class MarketplaceGamepassNotFoundError(MarketplaceIntegrationError):
+    """RBXCrate could not resolve a gamepass from the supplied Place ID."""
 
 
 class MarketplaceRateLimitedError(MarketplaceIntegrationError):

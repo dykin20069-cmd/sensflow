@@ -12,6 +12,7 @@ from sensflow.application.errors import (
     ConflictError,
     FeatureUnavailableError,
     InputValidationError,
+    MarketplaceGamepassNotFoundError,
     NotFoundError,
 )
 from sensflow.presentation.telegram.formatting import escape_text
@@ -33,6 +34,8 @@ def error_screen(error: Exception) -> Screen:
         message = escape_text(str(error))
     elif isinstance(error, FeatureUnavailableError):
         message = f"{escape_text(error.feature_name)} will be enabled in a later milestone."
+    elif isinstance(error, MarketplaceGamepassNotFoundError):
+        message = escape_text(str(error))
     elif isinstance(error, ApplicationError):
         message = "The action could not be completed."
     else:

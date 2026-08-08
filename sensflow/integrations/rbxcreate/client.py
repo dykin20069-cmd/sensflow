@@ -148,6 +148,7 @@ class RbxcrateClient:
             status_code=response.status_code,
             path=path,
             timestamp=timestamp,
+            response_text=response.text,
         )
 
 

@@ -11,11 +11,13 @@ class RbxcrateError(Exception):
         status_code: int | None = None,
         path: str | None = None,
         timestamp: str | None = None,
+        response_text: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.path = path
         self.timestamp = timestamp
+        self.response_text = response_text
 
 
 class RbxcrateAuthenticationError(RbxcrateError):

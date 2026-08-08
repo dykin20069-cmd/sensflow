@@ -1,10 +1,12 @@
 """Translate the typed RBXCrate adapter into application-level results."""
 
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
 from sensflow.application.errors import (
     MarketplaceCancellationUnsupportedError,
+    MarketplaceGamepassNotFoundError,
     MarketplaceIntegrationError,
     MarketplaceRateLimitedError,
     UnknownMarketplaceStatusError,
@@ -18,6 +20,15 @@ from sensflow.integrations.rbxcreate.errors import (
 )
 from sensflow.integrations.rbxcreate.gateway import RbxcrateGateway
 from sensflow.integrations.rbxcreate.models import OrderInfoResponse
+
+logger = logging.getLogger(__name__)
+
+GAMEPASS_NOT_FOUND_MESSAGE = (
+    "❌ Для выбранной игры не удалось автоматически найти подходящий gamepass.\n"
+    "Попробуйте:\n"
+    "• выбрать другой плейс,\n"
+    "• или использовать режим \u0441 ручным gamepass ID."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +107,13 @@ class RbxcreateBridge:
         place_id: int,
         gamepass_id: int | None = None,
     ) -> MarketplaceCreateResult:
+        logger.info(
+            "rbxcrate_quick_order_request username=%s amount=%s place_id=%s gamepass_id=%s",
+            roblox_username,
+            robux_amount,
+            place_id,
+            gamepass_id,
+        )
         try:
             response = await self._gateway.create_gamepass_order(
                 roblox_username=roblox_username,
@@ -107,10 +125,28 @@ class RbxcreateBridge:
                 check_ownership=True,
             )
         except RbxcrateError as error:
+            logger.error(
+                "rbxcrate_quick_order_failed username=%s amount=%s place_id=%s "
+                "gamepass_id=%s status=%s body=%s",
+                roblox_username,
+                robux_amount,
+                place_id,
+                gamepass_id,
+                error.status_code,
+                error.response_text or str(error),
+            )
+            if error.status_code == 404 and place_id is not None and gamepass_id is None:
+                raise MarketplaceGamepassNotFoundError(
+                    GAMEPASS_NOT_FOUND_MESSAGE,
+                    status_code=error.status_code,
+                    error_type=type(error).__name__,
+                    response_text=error.response_text,
+                ) from error
             raise MarketplaceIntegrationError(
                 "RBXCrate could not create the order",
                 status_code=error.status_code,
                 error_type=type(error).__name__,
+                response_text=error.response_text,
             ) from error
         if not response.success:
             raise MarketplaceIntegrationError("RBXCrate did not accept the order")
