@@ -275,6 +275,7 @@ def order_details_keyboard(
         ),
         OrderAction.CANCEL: ("❌ Cancel", OrderCallbackAction.CANCEL),
         OrderAction.REFRESH: ("🔄 Refresh Status", OrderCallbackAction.REFRESH),
+        OrderAction.REPEAT: ("🔁 Repeat order", OrderCallbackAction.REPEAT),
         OrderAction.TIMELINE: ("📋 Details", OrderCallbackAction.TIMELINE),
     }
     builder = InlineKeyboardBuilder()

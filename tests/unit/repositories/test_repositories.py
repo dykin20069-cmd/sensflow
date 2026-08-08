@@ -1,7 +1,7 @@
 """Unit tests for thin SQLAlchemy repository behavior."""
 
 import asyncio
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -182,6 +182,17 @@ def test_client_order_repository_exposes_queries_and_deletion_without_rules() ->
         assert "client_orders.current_place_id = 123" in duplicate_sql
         assert "client_orders.requested_robux = 100" in duplicate_sql
         assert "IN ('preorder', 'purchasing')" in duplicate_sql
+
+        await repository.find_recent_repeat_conflict(
+            username="Builder",
+            requested_robux=100,
+            since=datetime(2026, 8, 8, tzinfo=UTC) - timedelta(minutes=10),
+        )
+        repeat_sql = sql(session.scalar.await_args.args[0])
+        assert "lower(customers.current_username) = 'builder'" in repeat_sql
+        assert "client_orders.requested_robux = 100" in repeat_sql
+        assert "client_orders.created_at >=" in repeat_sql
+        assert "IN ('preorder', 'purchasing', 'completed')" in repeat_sql
 
         await repository.search("Builder")
         search_sql = sql(session.scalars.await_args.args[0])

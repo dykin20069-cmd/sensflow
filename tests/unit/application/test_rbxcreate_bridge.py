@@ -5,9 +5,13 @@ from decimal import Decimal
 
 import pytest
 
-from sensflow.application.errors import UnknownMarketplaceStatusError
+from sensflow.application.errors import (
+    MarketplaceRateLimitedError,
+    UnknownMarketplaceStatusError,
+)
 from sensflow.application.rbxcreate_bridge import RbxcreateBridge, map_marketplace_status
 from sensflow.domain.enums import MarketplaceOrderStatus
+from sensflow.integrations.rbxcreate.errors import RbxcrateDailyLimitReachedError
 from sensflow.integrations.rbxcreate.models import (
     DetailedStockItem,
     OrderInfoResponse,
@@ -79,5 +83,28 @@ def test_translates_stock_and_completed_order() -> None:
         assert result.purchased_quantity == 1000
         assert result.remaining_quantity == 0
         assert result.price == Decimal("12.50")
+
+    asyncio.run(scenario())
+
+
+def test_translates_status_polling_429_without_losing_http_metadata() -> None:
+    async def scenario() -> None:
+        gateway = FakeGateway()
+
+        async def rate_limited(*, order_id: str) -> OrderInfoResponse:
+            raise RbxcrateDailyLimitReachedError(
+                f"So fast for {order_id}",
+                status_code=429,
+                path="/api/orders/info",
+            )
+
+        gateway.get_order_info = rate_limited  # type: ignore[method-assign]
+        bridge = RbxcreateBridge(gateway)  # type: ignore[arg-type]
+
+        with pytest.raises(MarketplaceRateLimitedError) as raised:
+            await bridge.get_order_info("external-1")
+
+        assert raised.value.status_code == 429
+        assert raised.value.error_type == "RbxcrateDailyLimitReachedError"
 
     asyncio.run(scenario())

@@ -29,6 +29,7 @@ class OrderAction(StrEnum):
     DISABLE_AUTO_REQUEUE = "disable_auto_requeue"
     CANCEL = "cancel"
     REFRESH = "refresh"
+    REPEAT = "repeat"
     TIMELINE = "timeline"
 
 

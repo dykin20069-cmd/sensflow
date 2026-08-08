@@ -55,6 +55,7 @@ class OrderCallbackAction(StrEnum):
     TOGGLE_AUTO_REQUEUE = "auto_requeue"
     CANCEL = "cancel"
     REFRESH = "refresh"
+    REPEAT = "repeat"
     TIMELINE = "timeline"
     REUSE_SIMILAR = "reuse"
     CREATE_DUPLICATE = "duplicate"

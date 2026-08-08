@@ -334,6 +334,7 @@ async def receive_draft_place_id(
                 OrderCallbackAction.TOGGLE_AUTO_REQUEUE,
                 OrderCallbackAction.CANCEL,
                 OrderCallbackAction.REFRESH,
+                OrderCallbackAction.REPEAT,
             }
         )
     )
@@ -359,10 +360,13 @@ async def handle_order_action(
         OrderCallbackAction.TOGGLE_AUTO_REQUEUE: orders.toggle_auto_requeue,
         OrderCallbackAction.CANCEL: orders.cancel_order,
         OrderCallbackAction.REFRESH: orders.refresh_order,
+        OrderCallbackAction.REPEAT: orders.repeat_order,
     }
     try:
         result = await use_cases[callback_data.action](command)
-        order = await orders.get_order(GetOrderQuery(order_id=callback_data.order_id))
+        order = await orders.get_order(
+            GetOrderQuery(order_id=result.order_id or callback_data.order_id)
+        )
     except ApplicationError as error:
         await show_error(callback, error)
         return

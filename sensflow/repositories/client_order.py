@@ -61,6 +61,34 @@ class ClientOrderRepository(Repository[ClientOrder]):
         )
         return await self.session.scalar(statement)
 
+    async def find_recent_repeat_conflict(
+        self,
+        *,
+        username: str,
+        requested_robux: int,
+        since: datetime,
+    ) -> ClientOrder | None:
+        """Find a recent matching order that makes a repeat unsafe."""
+        statement = (
+            select(ClientOrder)
+            .join(ClientOrder.customer)
+            .where(
+                func.lower(Customer.current_username) == username.casefold(),
+                ClientOrder.requested_robux == requested_robux,
+                ClientOrder.created_at >= since,
+                ClientOrder.current_status.in_(
+                    (
+                        ClientOrderStatus.PREORDER,
+                        ClientOrderStatus.PURCHASING,
+                        ClientOrderStatus.COMPLETED,
+                    )
+                ),
+            )
+            .order_by(ClientOrder.created_at.desc(), ClientOrder.id)
+            .limit(1)
+        )
+        return await self.session.scalar(statement)
+
     async def list_by_status(
         self,
         status: ClientOrderStatus,

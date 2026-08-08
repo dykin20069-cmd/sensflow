@@ -330,6 +330,10 @@ class MarketplaceOrder(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("purchased_robux >= 0", name="purchased_robux_nonnegative"),
         CheckConstraint("remaining_robux >= 0", name="remaining_robux_nonnegative"),
         CheckConstraint(
+            "status_check_rate_limit_count >= 0",
+            name="status_check_rate_limit_count_nonnegative",
+        ),
+        CheckConstraint(
             "purchased_robux + remaining_robux = requested_robux",
             name="robux_amounts_consistent",
         ),
@@ -374,6 +378,15 @@ class MarketplaceOrder(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     remaining_robux: Mapped[int] = mapped_column(BigInteger, nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    purchase_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_status_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status_check_backoff_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status_check_rate_limit_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
 
     client_order: Mapped[ClientOrder] = relationship(back_populates="marketplace_orders")
 

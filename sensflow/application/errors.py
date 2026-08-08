@@ -40,6 +40,21 @@ class FeatureUnavailableError(ApplicationError):
 class MarketplaceIntegrationError(ApplicationError):
     """A safe application-level representation of an RBXCrate failure."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_type = error_type
+
+
+class MarketplaceRateLimitedError(MarketplaceIntegrationError):
+    """RBXCrate asked SensFlow to temporarily stop status polling."""
+
 
 class RobloxIntegrationError(ApplicationError):
     """A safe application-level representation of an official Roblox API failure."""

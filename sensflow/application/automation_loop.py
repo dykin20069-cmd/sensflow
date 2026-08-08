@@ -12,7 +12,11 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from sensflow.application.errors import MarketplaceIntegrationError
-from sensflow.application.marketplace_workflows import AutomationStockPlan, MarketplaceWorkflows
+from sensflow.application.marketplace_workflows import (
+    STATUS_CHECK_COOLDOWN_SECONDS,
+    AutomationStockPlan,
+    MarketplaceWorkflows,
+)
 from sensflow.application.notifications import NotificationService
 from sensflow.application.rbxcreate_bridge import MarketplaceStock
 from sensflow.domain.enums import ClientOrderStatus, MarketplaceOrderStatus, NotificationType
@@ -128,7 +132,6 @@ class AutomationLoop:
         await self._run_stock_pass(
             process_preorders=True,
             process_active=True,
-            process_fast_triggers=True,
             process_notifications=True,
         )
 
@@ -168,7 +171,6 @@ class AutomationLoop:
         *,
         process_preorders: bool,
         process_active: bool,
-        process_fast_triggers: bool = False,
         process_notifications: bool = True,
     ) -> None:
         """Use one stock snapshot for whichever automation schedules are due."""
@@ -187,7 +189,7 @@ class AutomationLoop:
                     ClientOrderStatus.PURCHASING,
                     limit=10_000,
                 )
-                if process_active or process_fast_triggers
+                if process_active
                 else []
             )
         now = self._clock()
@@ -199,41 +201,31 @@ class AutomationLoop:
         settings = await self._get_settings()
         if process_notifications:
             await self._queue_stock_notifications(plan, settings, now)
-        for order in active_orders if process_fast_triggers else ():
+        for order_id in plan.order_ids if process_preorders else ():
             try:
                 await self._workflows.fast_requeue(
-                    order.id,
+                    order_id,
                     plan.stock,
                     cooldown_seconds=FAST_REQUEUE_COOLDOWN_SECONDS,
                 )
             except Exception as error:
+                active_attempt = await self._get_active_attempt(order_id)
                 logger.exception(
                     "fast_stock_trigger_failed",
-                    extra={"order_id": str(order.id)},
-                )
-                await self._queue_marketplace_error(
-                    order.id,
-                    "fast_requeue",
-                    error,
-                    enabled=(
-                        settings.telegram_notifications_enabled
-                        and NotificationType.MARKETPLACE_ERROR in settings.notification_categories
+                    extra=_marketplace_failure_context(
+                        order_id,
+                        active_attempt,
+                        error,
+                        self._clock(),
                     ),
-                )
-        for order_id in plan.order_ids if process_preorders else ():
-            try:
-                await self._workflows.start_purchase(order_id)
-            except Exception as error:
-                logger.exception(
-                    "automatic_reorder_failed",
-                    extra={"order_id": str(order_id)},
                 )
                 await self._queue_marketplace_error(
                     order_id,
-                    "create_order",
+                    "fast_stock_trigger",
                     error,
                     enabled=(
-                        settings.telegram_notifications_enabled
+                        getattr(error, "status_code", None) != 429
+                        and settings.telegram_notifications_enabled
                         and NotificationType.MARKETPLACE_ERROR in settings.notification_categories
                     ),
                 )
@@ -241,21 +233,15 @@ class AutomationLoop:
             try:
                 await self._workflows.automatic_requeue(order.id, plan.stock)
             except Exception as error:
-                active_attempt = None
-                with suppress(Exception):
-                    async with self._sessions() as session:
-                        active_attempt = await MarketplaceOrderRepository(
-                            session
-                        ).get_active_for_client_order(order.id)
+                active_attempt = await self._get_active_attempt(order.id)
                 logger.exception(
                     "auto_requeue_failed",
                     extra={
-                        "order_id": str(order.id),
-                        "marketplace_order_id": (
-                            None if active_attempt is None else str(active_attempt.id)
-                        ),
-                        "external_order_id": (
-                            None if active_attempt is None else active_attempt.rbxcreate_order_id
+                        **_marketplace_failure_context(
+                            order.id,
+                            active_attempt,
+                            error,
+                            self._clock(),
                         ),
                         "customer": order.customer.current_username,
                         "requested_robux": order.requested_robux,
@@ -264,6 +250,7 @@ class AutomationLoop:
                 )
                 if (
                     self._notifications is not None
+                    and getattr(error, "status_code", None) != 429
                     and settings.telegram_notifications_enabled
                     and NotificationType.AUTO_REQUEUE_FAILED in settings.notification_categories
                 ):
@@ -278,12 +265,22 @@ class AutomationLoop:
                     "automatic_reorder",
                     error,
                     enabled=(
-                        settings.telegram_notifications_enabled
+                        getattr(error, "status_code", None) != 429
+                        and settings.telegram_notifications_enabled
                         and NotificationType.MARKETPLACE_ERROR in settings.notification_categories
                     ),
                 )
         if self._notifications is not None:
             await self._notifications.deliver_pending()
+
+    async def _get_active_attempt(self, order_id: UUID) -> object | None:
+        active_attempt = None
+        with suppress(Exception):
+            async with self._sessions() as session:
+                active_attempt = await MarketplaceOrderRepository(
+                    session
+                ).get_active_for_client_order(order_id)
+        return active_attempt
 
     async def _queue_stock_notifications(
         self,
@@ -378,7 +375,6 @@ class AutomationLoop:
                     await self._run_stock_pass(
                         process_preorders=(monitoring_due and settings.automatic_reorder_enabled),
                         process_active=requeue_due and settings.automatic_reorder_enabled,
-                        process_fast_triggers=settings.automatic_reorder_enabled,
                         process_notifications=stock_notification_due,
                     )
                     scheduled_at = loop.time()
@@ -469,3 +465,46 @@ def _marketplace_error_message(order_id: object, operation: str, error: Exceptio
         f"Error: {type(error).__name__}: {error}\n\n"
         "Retry scheduled automatically."
     )
+
+
+def _marketplace_failure_context(
+    order_id: UUID,
+    marketplace_order: object | None,
+    error: Exception,
+    now: datetime,
+) -> dict[str, object]:
+    purchase_started_at = getattr(marketplace_order, "purchase_started_at", None)
+    created_at = getattr(marketplace_order, "created_at", None)
+    started_at = purchase_started_at or created_at
+    last_status_check_at = getattr(marketplace_order, "last_status_check_at", None)
+    backoff_until = getattr(marketplace_order, "status_check_backoff_until", None)
+    return {
+        "order_id": str(order_id),
+        "marketplace_order_id": (
+            None if marketplace_order is None else str(getattr(marketplace_order, "id", None))
+        ),
+        "rbxcreate_order_id": getattr(marketplace_order, "rbxcreate_order_id", None),
+        "rbxcrate_http_status": getattr(error, "status_code", None),
+        "rbxcrate_error_type": getattr(error, "error_type", None) or type(error).__name__,
+        "current_marketplace_status": getattr(
+            getattr(marketplace_order, "marketplace_status", None),
+            "value",
+            None,
+        ),
+        "purchase_age_ms": (
+            None if started_at is None else max(0, int((now - started_at).total_seconds() * 1000))
+        ),
+        "status_check_cooldown_remaining_ms": _remaining_milliseconds(
+            None
+            if last_status_check_at is None
+            else last_status_check_at + timedelta(seconds=STATUS_CHECK_COOLDOWN_SECONDS),
+            now,
+        ),
+        "backoff_remaining_ms": _remaining_milliseconds(backoff_until, now),
+    }
+
+
+def _remaining_milliseconds(until: datetime | None, now: datetime) -> int:
+    if until is None:
+        return 0
+    return max(0, int((until - now).total_seconds() * 1000))

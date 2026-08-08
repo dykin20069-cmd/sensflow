@@ -136,7 +136,7 @@ def test_stock_notification_describes_selected_tier_and_client_count() -> None:
     assert "current limit ≤ 4.5$" in message
 
 
-def test_reorder_pass_uses_one_stock_plan_for_preorders_and_active_orders(
+def test_reorder_pass_uses_one_stock_plan_without_fast_requeueing_active_orders(
     monkeypatch: Any,
 ) -> None:
     async def scenario() -> None:
@@ -211,9 +211,9 @@ def test_reorder_pass_uses_one_stock_plan_for_preorders_and_active_orders(
         await automation.run_reorder_pass()
 
         workflows.plan_automation.assert_awaited_once()
-        workflows.start_purchase.assert_awaited_once_with(preorder_id)
+        workflows.start_purchase.assert_not_awaited()
         workflows.fast_requeue.assert_awaited_once_with(
-            active_id,
+            preorder_id,
             (stock,),
             cooldown_seconds=FAST_REQUEUE_COOLDOWN_SECONDS,
         )
@@ -227,17 +227,7 @@ def test_reorder_pass_uses_one_stock_plan_for_preorders_and_active_orders(
         )
 
         assert workflows.plan_automation.await_args.args[0] == ()
-        assert workflows.start_purchase.await_count == 1
         assert workflows.fast_requeue.await_count == 1
-        assert workflows.automatic_requeue.await_count == 2
-
-        await automation._run_stock_pass(
-            process_preorders=False,
-            process_active=False,
-            process_fast_triggers=True,
-        )
-
-        assert workflows.fast_requeue.await_count == 2
         assert workflows.automatic_requeue.await_count == 2
 
     asyncio.run(scenario())

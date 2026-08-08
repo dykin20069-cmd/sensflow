@@ -174,6 +174,8 @@ def _order_actions(
             OrderAction.REFRESH,
             OrderAction.TIMELINE,
         )
+    if status is ClientOrderStatus.CANCELLED:
+        return (OrderAction.REPEAT, OrderAction.TIMELINE)
     return (OrderAction.TIMELINE,)
 
 
@@ -737,6 +739,7 @@ class OrderApplicationService:
                         external_result,
                         active_order_exists=active is not None,
                     )
+                    attempt.purchase_started_at = event_time
                     await orders.save(order)
                     await marketplace_orders.save(attempt)
                     await timeline.save(
@@ -1006,6 +1009,80 @@ class OrderApplicationService:
         if self._marketplace_workflows is not None:
             return await self._marketplace_workflows.synchronize_active_purchase(command.order_id)
         raise FeatureUnavailableError("Marketplace Order refresh")
+
+    async def repeat_order(self, command: OrderActionCommand) -> ActionResultDTO:
+        """Create and immediately start an independent copy of a cancelled order."""
+        _authorize(command.operator_id, self._operator_id)
+        if self._marketplace_workflows is None:
+            raise FeatureUnavailableError("Repeat order")
+        try:
+            async with self._sessions.begin() as session:
+                orders = ClientOrderRepository(session)
+                source = await orders.get_for_update(command.order_id)
+                if source is None:
+                    raise NotFoundError("Client Order")
+                if source.current_status is not ClientOrderStatus.CANCELLED:
+                    raise DomainConflictError("Only a cancelled order can be repeated")
+                customer = await CustomerRepository(session).get_for_update(source.customer_id)
+                if customer is None:
+                    raise NotFoundError("Customer")
+                now = self._clock()
+                conflict = await orders.find_recent_repeat_conflict(
+                    username=customer.current_username,
+                    requested_robux=source.requested_robux,
+                    since=now - timedelta(minutes=10),
+                )
+                if conflict is not None:
+                    raise ConflictError(
+                        "⚠️ Similar active or recently completed order already exists. "
+                        "Repeat is blocked to prevent duplicate purchases."
+                    )
+                repeated = await orders.save(
+                    create_draft(
+                        customer,
+                        source.requested_robux,
+                        source.current_place_id,
+                        source.marketplace_rate_limit,
+                        source.preferred_rate,
+                        source.preferred_timeout_minutes,
+                        preferred_mode_enabled=source.preferred_rate is not None,
+                    )
+                )
+                timeline = TimelineEventRepository(session)
+                await timeline.save(
+                    create_timeline_event(
+                        repeated,
+                        TimelineEventType.ORDER_CREATED,
+                        f"Client Order repeated from {source.id}.",
+                        now,
+                    )
+                )
+                enter_preorder(repeated, now)
+                await orders.save(repeated)
+                await timeline.save(
+                    create_timeline_event(
+                        repeated,
+                        TimelineEventType.PAYMENT_CONFIRMED,
+                        "Payment confirmation copied from the cancelled order.",
+                        now + timedelta(microseconds=1),
+                    )
+                )
+                await timeline.save(
+                    create_timeline_event(
+                        repeated,
+                        TimelineEventType.PREORDER_CREATED,
+                        "Repeated order queued for an immediate stock check.",
+                        now + timedelta(microseconds=2),
+                    )
+                )
+                repeated_id = repeated.id
+        except (DomainValidationError, DomainConflictError) as error:
+            _raise_domain_error(error)
+        result = await self._marketplace_workflows.start_purchase(repeated_id)
+        return ActionResultDTO(
+            message=f"Repeat order created. {result.message}",
+            order_id=repeated_id,
+        )
 
 
 class CustomerApplicationService:

@@ -6,11 +6,13 @@ from decimal import Decimal
 from sensflow.application.errors import (
     MarketplaceCancellationUnsupportedError,
     MarketplaceIntegrationError,
+    MarketplaceRateLimitedError,
     UnknownMarketplaceStatusError,
 )
 from sensflow.domain.enums import MarketplaceOrderStatus
 from sensflow.integrations.rbxcreate.dry_run import RbxcrateDryRunGateway
 from sensflow.integrations.rbxcreate.errors import (
+    RbxcrateDailyLimitReachedError,
     RbxcrateError,
     RbxcrateUnsupportedStatusError,
 )
@@ -70,7 +72,11 @@ class RbxcreateBridge:
         try:
             items = await self._gateway.get_detailed_stock()
         except RbxcrateError as error:
-            raise MarketplaceIntegrationError("RBXCrate stock is unavailable") from error
+            raise MarketplaceIntegrationError(
+                "RBXCrate stock is unavailable",
+                status_code=error.status_code,
+                error_type=type(error).__name__,
+            ) from error
         return tuple(
             MarketplaceStock(
                 rate=item.rate,
@@ -101,7 +107,11 @@ class RbxcreateBridge:
                 check_ownership=True,
             )
         except RbxcrateError as error:
-            raise MarketplaceIntegrationError("RBXCrate could not create the order") from error
+            raise MarketplaceIntegrationError(
+                "RBXCrate could not create the order",
+                status_code=error.status_code,
+                error_type=type(error).__name__,
+            ) from error
         if not response.success:
             raise MarketplaceIntegrationError("RBXCrate did not accept the order")
         return MarketplaceCreateResult(
@@ -112,8 +122,18 @@ class RbxcreateBridge:
     async def get_order_info(self, external_order_id: str) -> MarketplaceSyncResult:
         try:
             response = await self._gateway.get_order_info(order_id=external_order_id)
+        except RbxcrateDailyLimitReachedError as error:
+            raise MarketplaceRateLimitedError(
+                "RBXCrate status polling is temporarily rate limited",
+                status_code=error.status_code,
+                error_type=type(error).__name__,
+            ) from error
         except RbxcrateError as error:
-            raise MarketplaceIntegrationError("RBXCrate order status is unavailable") from error
+            raise MarketplaceIntegrationError(
+                "RBXCrate order status is unavailable",
+                status_code=error.status_code,
+                error_type=type(error).__name__,
+            ) from error
         return _sync_result(response, external_order_id)
 
     async def cancel_order(self, external_order_id: str) -> None:
@@ -121,17 +141,27 @@ class RbxcreateBridge:
             await self._gateway.cancel_order(order_id=external_order_id)
         except RbxcrateUnsupportedStatusError as error:
             raise MarketplaceCancellationUnsupportedError(
-                "RBXCrate requires the latest order status"
+                "RBXCrate requires the latest order status",
+                status_code=error.status_code,
+                error_type=type(error).__name__,
             ) from error
         except RbxcrateError as error:
-            raise MarketplaceIntegrationError("RBXCrate could not cancel the order") from error
+            raise MarketplaceIntegrationError(
+                "RBXCrate could not cancel the order",
+                status_code=error.status_code,
+                error_type=type(error).__name__,
+            ) from error
 
     async def get_balance(self) -> Decimal:
         """Return the account balance without exposing an infrastructure model."""
         try:
             response = await self._gateway.get_balance()
         except RbxcrateError as error:
-            raise MarketplaceIntegrationError("RBXCrate balance is unavailable") from error
+            raise MarketplaceIntegrationError(
+                "RBXCrate balance is unavailable",
+                status_code=error.status_code,
+                error_type=type(error).__name__,
+            ) from error
         return response.balance
 
 

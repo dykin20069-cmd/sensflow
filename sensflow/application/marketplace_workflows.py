@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from html import escape
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,7 +19,9 @@ from sensflow.application.dto import (
 )
 from sensflow.application.errors import (
     ConflictError,
+    MarketplaceCancellationUnsupportedError,
     MarketplaceIntegrationError,
+    MarketplaceRateLimitedError,
     NotFoundError,
 )
 from sensflow.application.rbxcreate_bridge import (
@@ -80,6 +82,9 @@ from sensflow.repositories import (
 SessionFactory = async_sessionmaker[AsyncSession]
 Clock = Callable[[], datetime]
 logger = logging.getLogger(__name__)
+FRESH_PURCHASE_GUARD_SECONDS = 5
+STATUS_CHECK_COOLDOWN_SECONDS = 3
+STATUS_CHECK_BACKOFF_SECONDS = (5, 10, 20)
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +105,12 @@ class AutomationStockPlan:
     stock: tuple[MarketplaceStock, ...]
     minimum_purchase_rate: Decimal
     maximum_purchase_rate: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class _StatusCheckOutcome:
+    snapshot: MarketplaceSyncResult
+    skipped: bool = False
 
 
 class MarketplaceWorkflows:
@@ -230,7 +241,11 @@ class MarketplaceWorkflows:
         """Expose the RBXCrate balance to the owned automation coordinator."""
         return await self._bridge.get_balance()
 
-    async def start_purchase(self, order_id: UUID) -> ActionResultDTO:
+    async def start_purchase(
+        self,
+        order_id: UUID,
+        stock: tuple[MarketplaceStock, ...] | None = None,
+    ) -> ActionResultDTO:
         """Select suitable stock and either start an attempt or retain a PreOrder."""
         try:
             async with self._sessions.begin() as session:
@@ -270,9 +285,9 @@ class MarketplaceWorkflows:
                         )
                     )
 
-                stock = await self._bridge.get_detailed_stock()
+                current_stock = await self._bridge.get_detailed_stock() if stock is None else stock
                 selected = _select_stock(
-                    stock,
+                    current_stock,
                     requested_robux=order.requested_robux,
                     minimum_purchase_rate=self._minimum_purchase_rate,
                     maximum_purchase_rate=effective_purchase_rate(order, now),
@@ -331,6 +346,7 @@ class MarketplaceWorkflows:
                     ),
                     active_order_exists=False,
                 )
+                marketplace_order.purchase_started_at = now
                 await orders.save(order)
                 await MarketplaceOrderRepository(session).save(marketplace_order)
                 await timeline.save(
@@ -408,9 +424,15 @@ class MarketplaceWorkflows:
                         error_message=None,
                     )
                 else:
-                    snapshot = await self._bridge.get_order_info(
-                        marketplace_order.rbxcreate_order_id
+                    status_check = await self._get_order_info_if_due(
+                        session,
+                        marketplace_order,
                     )
+                    if status_check.skipped:
+                        return ActionResultDTO(
+                            message="Marketplace status check skipped; cached status retained."
+                        )
+                    snapshot = status_check.snapshot
                 if (
                     marketplace_order.marketplace_status is MarketplaceOrderStatus.COMPLETED
                     and snapshot.status is not MarketplaceOrderStatus.COMPLETED
@@ -461,7 +483,6 @@ class MarketplaceWorkflows:
             order_id,
             stock=stock,
             automatic=True,
-            fast=False,
         )
 
     async def fast_requeue(
@@ -471,14 +492,57 @@ class MarketplaceWorkflows:
         *,
         cooldown_seconds: float,
     ) -> ActionResultDTO:
-        """Immediately replace an active attempt when its effective rate has stock."""
-        return await self._requeue_active(
-            order_id,
-            stock=stock,
-            automatic=True,
-            fast=True,
-            cooldown_seconds=cooldown_seconds,
+        """Start an eligible PreOrder; never replace an active purchase."""
+        del cooldown_seconds
+        async with self._sessions() as session:
+            order = await ClientOrderRepository(session).get(order_id)
+            if order is None:
+                raise NotFoundError("Client Order")
+            if order.current_status is ClientOrderStatus.PREORDER:
+                now = self._clock()
+                selected = _select_stock(
+                    stock,
+                    requested_robux=order.requested_robux,
+                    minimum_purchase_rate=self._minimum_purchase_rate,
+                    maximum_purchase_rate=effective_purchase_rate(order, now),
+                )
+                if selected is None:
+                    return ActionResultDTO(
+                        message="No suitable stock for the fast PreOrder trigger."
+                    )
+            elif order.current_status is ClientOrderStatus.PURCHASING:
+                active = await MarketplaceOrderRepository(session).get_active_for_client_order(
+                    order.id
+                )
+                now = self._clock()
+                if active is not None and _purchase_age(active, now) < timedelta(
+                    seconds=FRESH_PURCHASE_GUARD_SECONDS
+                ):
+                    logger.info(
+                        "fast_requeue_skipped_recent_purchase",
+                        extra=_recent_purchase_log_context(order.id, active, now),
+                    )
+                    return ActionResultDTO(message="Fresh purchase retained without requeue.")
+                logger.info(
+                    "fast_requeue_skipped_active_purchase",
+                    extra={
+                        "order_id": str(order.id),
+                        "marketplace_order_id": (None if active is None else str(active.id)),
+                    },
+                )
+                return ActionResultDTO(message="Active purchase retained without fast requeue.")
+            else:
+                return ActionResultDTO(message="Order is not eligible for the fast stock trigger.")
+        result = await self.start_purchase(order_id, stock)
+        logger.info(
+            "fast_stock_trigger",
+            extra={
+                "order_id": str(order_id),
+                "detected_rate": str(selected.rate),
+                "previous_marketplace_order": None,
+            },
         )
+        return result
 
     async def _requeue_active(
         self,
@@ -486,8 +550,6 @@ class MarketplaceWorkflows:
         *,
         stock: tuple[MarketplaceStock, ...] | None,
         automatic: bool,
-        fast: bool = False,
-        cooldown_seconds: float = 0,
     ) -> ActionResultDTO:
         """Check, cancel, confirm, and replace one attempt under database row locks."""
         try:
@@ -516,64 +578,46 @@ class MarketplaceWorkflows:
 
                 settings = await self._get_settings(session)
                 now = self._clock()
+                if _purchase_age(active, now) < timedelta(seconds=FRESH_PURCHASE_GUARD_SECONDS):
+                    logger.info(
+                        "fast_requeue_skipped_recent_purchase",
+                        extra=_recent_purchase_log_context(order.id, active, now),
+                    )
+                    return ActionResultDTO(message="Fresh purchase retained without requeue.")
                 delay = settings.auto_requeue_delay_seconds or Decimal("5")
                 requeue_anchor = order.last_requeue_at or active.created_at
                 if (
                     automatic
-                    and not fast
                     and requeue_anchor is not None
                     and now - requeue_anchor < timedelta(seconds=float(delay))
                 ):
                     return ActionResultDTO(message="Automatic requeue delay has not elapsed.")
-                if (
-                    fast
-                    and order.last_requeue_at is not None
-                    and now - order.last_requeue_at < timedelta(seconds=cooldown_seconds)
-                ):
-                    return ActionResultDTO(message="Fast requeue cooldown has not elapsed.")
-
-                current_stock = (
-                    await self._bridge.get_detailed_stock()
-                    if fast and stock is None
-                    else stock or ()
-                )
-                selected = (
-                    _select_stock(
-                        current_stock,
-                        requested_robux=order.requested_robux,
-                        minimum_purchase_rate=self._minimum_purchase_rate,
-                        maximum_purchase_rate=effective_purchase_rate(order, now),
-                    )
-                    if fast
-                    else None
-                )
-                if fast and selected is None:
-                    return ActionResultDTO(message="No suitable stock for fast requeue.")
 
                 customer = await CustomerRepository(session).get(order.customer_id)
                 if customer is None:
                     raise NotFoundError("Customer")
                 expected_active_id = active.id
                 expected_external_id = active.rbxcreate_order_id
-                initial_status = await self._bridge.get_order_info(active.rbxcreate_order_id)
-                if initial_status.status is not MarketplaceOrderStatus.ACTIVE:
+                status_check = await self._get_order_info_if_due(session, active)
+                if status_check.skipped:
+                    return ActionResultDTO(
+                        message="Marketplace status check deferred; active order retained."
+                    )
+                if status_check.snapshot.status is not MarketplaceOrderStatus.ACTIVE:
                     return await self._apply_synchronization(
                         session,
                         order,
                         active,
-                        initial_status,
+                        status_check.snapshot,
                     )
 
-                if selected is None:
-                    current_stock = (
-                        await self._bridge.get_detailed_stock() if stock is None else stock
-                    )
-                    selected = _select_stock(
-                        current_stock,
-                        requested_robux=order.requested_robux,
-                        minimum_purchase_rate=self._minimum_purchase_rate,
-                        maximum_purchase_rate=order.marketplace_rate_limit,
-                    )
+                current_stock = await self._bridge.get_detailed_stock() if stock is None else stock
+                selected = _select_stock(
+                    current_stock,
+                    requested_robux=order.requested_robux,
+                    minimum_purchase_rate=self._minimum_purchase_rate,
+                    maximum_purchase_rate=order.marketplace_rate_limit,
+                )
                 if selected is None:
                     message = (
                         "No suitable stock for automatic requeue."
@@ -582,18 +626,8 @@ class MarketplaceWorkflows:
                     )
                     return ActionResultDTO(message=message)
 
-                if fast:
-                    logger.info(
-                        "fast_stock_trigger",
-                        extra={
-                            "order_id": str(order.id),
-                            "detected_rate": str(selected.rate),
-                            "previous_marketplace_order": active.rbxcreate_order_id,
-                        },
-                    )
-
                 attempt_number = (order.requeue_attempts or 0) + 2
-                if automatic and not fast:
+                if automatic:
                     logger.info(
                         "auto_requeue_started",
                         extra={
@@ -622,24 +656,22 @@ class MarketplaceWorkflows:
                             )
                         )
 
-                await self._bridge.cancel_order(active.rbxcreate_order_id)
-                confirmed_status = await self._bridge.get_order_info(active.rbxcreate_order_id)
-
-                if confirmed_status.status is MarketplaceOrderStatus.COMPLETED:
-                    return await self._apply_synchronization(
-                        session,
-                        order,
-                        active,
-                        confirmed_status,
+                try:
+                    await self._bridge.cancel_order(active.rbxcreate_order_id)
+                except MarketplaceCancellationUnsupportedError as error:
+                    logger.warning(
+                        "requeue_cancel_skipped_unsupported_status",
+                        extra={
+                            "order_id": str(order.id),
+                            "marketplace_order_id": str(active.id),
+                            "rbxcreate_order_id": active.rbxcreate_order_id,
+                            "rbxcrate_http_status": error.status_code,
+                            "rbxcrate_error_type": error.error_type,
+                            "current_marketplace_status": active.marketplace_status.value,
+                        },
                     )
-                if confirmed_status.status is not MarketplaceOrderStatus.CANCELLED:
-                    if automatic:
-                        raise MarketplaceIntegrationError(
-                            "RBXCrate did not confirm cancellation; "
-                            "automatic retry remains scheduled"
-                        )
                     return ActionResultDTO(
-                        message="Cancellation is not confirmed; the active order was retained."
+                        message="RBXCrate no longer allows cancellation; active order retained."
                     )
                 if (
                     active.id != expected_active_id
@@ -647,6 +679,10 @@ class MarketplaceWorkflows:
                 ):
                     raise DomainConflictError("The active Marketplace Order changed concurrently")
 
+                confirmed_status = _cached_sync_result(
+                    active,
+                    status=MarketplaceOrderStatus.CANCELLED,
+                )
                 await self._apply_synchronization(
                     session,
                     order,
@@ -656,7 +692,7 @@ class MarketplaceWorkflows:
                 start_purchasing(order)
                 external = await self._bridge.create_gamepass_order(
                     roblox_username=customer.current_username,
-                    order_id=f"{order.id}:{active.id}",
+                    order_id=str(uuid4()),
                     robux_amount=order.requested_robux,
                     place_id=order.current_place_id,
                 )
@@ -674,6 +710,7 @@ class MarketplaceWorkflows:
                     active_order_exists=False,
                 )
                 requeue_time = self._clock()
+                replacement.purchase_started_at = requeue_time
                 order.last_requeue_at = requeue_time
                 order.requeue_attempts = (order.requeue_attempts or 0) + 1
                 await orders.save(order)
@@ -703,13 +740,9 @@ class MarketplaceWorkflows:
                         requeue_time + timedelta(microseconds=2),
                     )
                 )
-                if (
-                    automatic
-                    and not fast
-                    and _notification_enabled(
-                        settings,
-                        NotificationType.AUTO_REQUEUE_COMPLETED,
-                    )
+                if automatic and _notification_enabled(
+                    settings,
+                    NotificationType.AUTO_REQUEUE_COMPLETED,
                 ):
                     await NotificationRepository(session).save(
                         Notification(
@@ -725,7 +758,7 @@ class MarketplaceWorkflows:
                             delivery_status=NotificationDeliveryStatus.PENDING,
                         )
                     )
-                if automatic and not fast:
+                if automatic:
                     logger.info(
                         "auto_requeue_completed",
                         extra={
@@ -745,9 +778,7 @@ class MarketplaceWorkflows:
             raise ConflictError("The order changed concurrently; please refresh") from error
         return ActionResultDTO(
             message=(
-                "Marketplace Order requeued by fast stock trigger."
-                if fast
-                else "Marketplace Order automatically requeued."
+                "Marketplace Order automatically requeued."
                 if automatic
                 else "Active Marketplace Order was requeued."
             )
@@ -765,6 +796,13 @@ class MarketplaceWorkflows:
                     session
                 ).get_active_for_client_order_for_update(order_id)
                 if active is not None:
+                    now = self._clock()
+                    if _purchase_age(active, now) < timedelta(seconds=FRESH_PURCHASE_GUARD_SECONDS):
+                        logger.info(
+                            "fast_requeue_skipped_recent_purchase",
+                            extra=_recent_purchase_log_context(order.id, active, now),
+                        )
+                        return ActionResultDTO(message="Fresh purchase cannot be cancelled yet.")
                     active_id = active.id
                     external_order_id = active.rbxcreate_order_id
                 elif order.current_status is ClientOrderStatus.CANCELLED:
@@ -788,13 +826,46 @@ class MarketplaceWorkflows:
             raise ConflictError(str(error)) from error
 
         if active_id is not None and external_order_id is not None:
-            await self._bridge.cancel_order(external_order_id)
-            await self.synchronize_marketplace_order(active_id)
+            try:
+                await self._bridge.cancel_order(external_order_id)
+            except MarketplaceCancellationUnsupportedError as error:
+                logger.warning(
+                    "cancel_skipped_unsupported_status",
+                    extra={
+                        "order_id": str(order_id),
+                        "marketplace_order_id": str(active_id),
+                        "rbxcreate_order_id": external_order_id,
+                        "rbxcrate_http_status": error.status_code,
+                        "rbxcrate_error_type": error.error_type,
+                    },
+                )
+                return ActionResultDTO(
+                    message="RBXCrate no longer allows cancellation; active order retained."
+                )
             async with self._sessions.begin() as session:
                 orders = ClientOrderRepository(session)
                 order = await orders.get_for_update(order_id)
                 if order is None:
                     raise NotFoundError("Client Order")
+                marketplace_orders = MarketplaceOrderRepository(session)
+                active = await marketplace_orders.get_for_update(active_id)
+                if (
+                    active is None
+                    or active.rbxcreate_order_id != external_order_id
+                    or active.marketplace_status is not MarketplaceOrderStatus.ACTIVE
+                ):
+                    return ActionResultDTO(
+                        message="Marketplace order changed while cancellation was in progress."
+                    )
+                await self._apply_synchronization(
+                    session,
+                    order,
+                    active,
+                    _cached_sync_result(
+                        active,
+                        status=MarketplaceOrderStatus.CANCELLED,
+                    ),
+                )
                 if order.current_status is not ClientOrderStatus.PREORDER:
                     raise ConflictError(
                         "RBXCrate has not confirmed cancellation; the Client Order remains active"
@@ -813,6 +884,86 @@ class MarketplaceWorkflows:
                 await self._save_order_cancelled_notification(session, order)
             return ActionResultDTO(message="Order cancelled.")
         return ActionResultDTO(message="Order cancelled.")
+
+    async def _get_order_info_if_due(
+        self,
+        session: AsyncSession,
+        marketplace_order: MarketplaceOrder,
+    ) -> _StatusCheckOutcome:
+        """Poll one external status only after its persisted guards have elapsed."""
+        now = self._clock()
+        cached = _cached_sync_result(marketplace_order)
+        purchase_age = _purchase_age(marketplace_order, now)
+        if purchase_age < timedelta(seconds=FRESH_PURCHASE_GUARD_SECONDS):
+            logger.info(
+                "marketplace_status_check_skipped_recent_purchase",
+                extra={
+                    **_recent_purchase_log_context(
+                        marketplace_order.client_order_id,
+                        marketplace_order,
+                        now,
+                    ),
+                    "status_check_cooldown_remaining_ms": max(
+                        0,
+                        int(
+                            (
+                                timedelta(seconds=FRESH_PURCHASE_GUARD_SECONDS) - purchase_age
+                            ).total_seconds()
+                            * 1000
+                        ),
+                    ),
+                },
+            )
+            return _StatusCheckOutcome(cached, skipped=True)
+        if (
+            marketplace_order.status_check_backoff_until is not None
+            and now < marketplace_order.status_check_backoff_until
+        ):
+            logger.warning(
+                "marketplace_status_check_skipped_backoff",
+                extra={
+                    "order_id": str(marketplace_order.client_order_id),
+                    "marketplace_order_id": str(marketplace_order.id),
+                    "rbxcreate_order_id": marketplace_order.rbxcreate_order_id,
+                    "backoff_remaining_ms": int(
+                        (marketplace_order.status_check_backoff_until - now).total_seconds() * 1000
+                    ),
+                },
+            )
+            return _StatusCheckOutcome(cached, skipped=True)
+        if (
+            marketplace_order.last_status_check_at is not None
+            and now - marketplace_order.last_status_check_at
+            < timedelta(seconds=STATUS_CHECK_COOLDOWN_SECONDS)
+        ):
+            return _StatusCheckOutcome(cached, skipped=True)
+        try:
+            snapshot = await self._bridge.get_order_info(marketplace_order.rbxcreate_order_id)
+        except MarketplaceRateLimitedError as error:
+            consecutive = (marketplace_order.status_check_rate_limit_count or 0) + 1
+            backoff_seconds = STATUS_CHECK_BACKOFF_SECONDS[min(consecutive - 1, 2)]
+            marketplace_order.last_status_check_at = now
+            marketplace_order.status_check_rate_limit_count = consecutive
+            marketplace_order.status_check_backoff_until = now + timedelta(seconds=backoff_seconds)
+            await MarketplaceOrderRepository(session).save(marketplace_order)
+            logger.warning(
+                "rbxcrate_status_rate_limited",
+                extra={
+                    "order_id": str(marketplace_order.client_order_id),
+                    "marketplace_order_id": str(marketplace_order.id),
+                    "rbxcreate_order_id": marketplace_order.rbxcreate_order_id,
+                    "rbxcrate_http_status": error.status_code,
+                    "rbxcrate_error_type": error.error_type,
+                    "backoff_seconds": backoff_seconds,
+                    "consecutive_rate_limits": consecutive,
+                },
+            )
+            return _StatusCheckOutcome(cached, skipped=True)
+        marketplace_order.last_status_check_at = now
+        marketplace_order.status_check_rate_limit_count = 0
+        marketplace_order.status_check_backoff_until = None
+        await MarketplaceOrderRepository(session).save(marketplace_order)
+        return _StatusCheckOutcome(snapshot)
 
     async def _save_order_cancelled_notification(
         self,
@@ -1033,6 +1184,43 @@ def _select_stock(
         key=lambda item: (item.rate, -item.total_robux_amount),
     )
     return ordered[0] if ordered else None
+
+
+def _purchase_age(marketplace_order: MarketplaceOrder, now: datetime) -> timedelta:
+    started_at = marketplace_order.purchase_started_at or marketplace_order.created_at
+    if started_at is None:
+        return timedelta.max
+    return max(timedelta(), now - started_at)
+
+
+def _recent_purchase_log_context(
+    order_id: UUID,
+    marketplace_order: MarketplaceOrder,
+    now: datetime,
+) -> dict[str, str | int]:
+    return {
+        "order_id": str(order_id),
+        "marketplace_order_id": str(marketplace_order.id),
+        "age_ms": int(_purchase_age(marketplace_order, now).total_seconds() * 1000),
+    }
+
+
+def _cached_sync_result(
+    marketplace_order: MarketplaceOrder,
+    *,
+    status: MarketplaceOrderStatus | None = None,
+) -> MarketplaceSyncResult:
+    cached_status = status or marketplace_order.marketplace_status
+    return MarketplaceSyncResult(
+        external_order_id=marketplace_order.rbxcreate_order_id,
+        status=cached_status,
+        purchased_quantity=marketplace_order.purchased_robux,
+        remaining_quantity=marketplace_order.remaining_robux,
+        vendor_id=None,
+        price=None,
+        error_reason=None,
+        error_message=None,
+    )
 
 
 def _select_preorders_maximum_clients(

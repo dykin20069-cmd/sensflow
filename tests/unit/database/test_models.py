@@ -169,6 +169,7 @@ def test_core_check_constraints_are_present() -> None:
     assert "ck_client_orders_preferred_timeout_positive" in check_constraints
     assert "ck_client_orders_executed_rate_positive" in check_constraints
     assert "ck_marketplace_orders_robux_amounts_consistent" in check_constraints
+    assert "ck_marketplace_orders_status_check_rate_limit_count_nonnegative" in check_constraints
     assert "ck_notifications_delivery_timestamp_consistent" in check_constraints
     assert "ck_system_settings_reorder_interval_minimum" in check_constraints
     assert "ck_system_settings_auto_requeue_delay_minimum" in check_constraints
@@ -178,6 +179,16 @@ def test_core_check_constraints_are_present() -> None:
     assert "ck_system_settings_low_balance_threshold_nonnegative" in check_constraints
     assert "ck_system_settings_critical_balance_threshold_valid" in check_constraints
     assert "ck_system_settings_sync_interval_positive" in check_constraints
+
+
+def test_marketplace_order_persists_request_guard_metadata() -> None:
+    columns = MarketplaceOrder.__table__.c
+
+    assert columns.purchase_started_at.nullable is True
+    assert columns.last_status_check_at.nullable is True
+    assert columns.status_check_backoff_until.nullable is True
+    assert columns.status_check_rate_limit_count.nullable is False
+    assert str(columns.status_check_rate_limit_count.server_default.arg) == "0"
 
 
 def test_documented_relationships_are_present() -> None:

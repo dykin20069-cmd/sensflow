@@ -17,12 +17,14 @@ from sensflow.application.commands import (
     PrepareCreateOrderCommand,
     UpdateSettingCommand,
 )
+from sensflow.application.dto import ActionResultDTO, OrderAction
 from sensflow.application.errors import AuthorizationError, ConflictError
 from sensflow.application.gateways import MarketplaceCancellationResult
 from sensflow.application.services import (
     CustomerApplicationService,
     OrderApplicationService,
     SettingsApplicationService,
+    _order_actions,
 )
 from sensflow.domain.customer.service import RobloxIdentity
 from sensflow.domain.enums import (
@@ -533,6 +535,127 @@ def test_purchase_completion_captures_finance_and_is_idempotent() -> None:
         assert timeline.save.await_count == 2
 
     asyncio.run(exercise())
+
+
+def test_repeat_order_copies_policy_and_starts_an_independent_order() -> None:
+    async def exercise() -> None:
+        source = draft()
+        source.current_status = ClientOrderStatus.CANCELLED
+        source.preferred_rate = Decimal("1.00")
+        source.preferred_timeout_minutes = 35
+        source.fallback_active = False
+        customer = Customer(
+            id=source.customer_id,
+            roblox_user_id=42,
+            current_username="Builderman",
+            current_place_id=source.current_place_id,
+        )
+        repeated_id = uuid4()
+        orders = MagicMock()
+        orders.get_for_update = AsyncMock(return_value=source)
+        orders.find_recent_repeat_conflict = AsyncMock(return_value=None)
+
+        async def save_order(order: ClientOrder) -> ClientOrder:
+            order.id = repeated_id
+            return order
+
+        orders.save = AsyncMock(side_effect=save_order)
+        customers = MagicMock()
+        customers.get_for_update = AsyncMock(return_value=customer)
+        timeline = MagicMock()
+        timeline.save = AsyncMock(side_effect=lambda value: value)
+        workflows = MagicMock()
+        workflows.start_purchase = AsyncMock(
+            return_value=ActionResultDTO(message="Purchase started via RBXCrate.")
+        )
+        service = OrderApplicationService(
+            TransactionFactory(),
+            marketplace_workflows=workflows,
+            operator_id=42,
+            clock=lambda: NOW,
+        )
+
+        with (
+            patch("sensflow.application.services.ClientOrderRepository", return_value=orders),
+            patch("sensflow.application.services.CustomerRepository", return_value=customers),
+            patch("sensflow.application.services.TimelineEventRepository", return_value=timeline),
+        ):
+            result = await service.repeat_order(
+                OrderActionCommand(order_id=source.id, operator_id=42)
+            )
+
+        repeated = orders.save.await_args.args[0]
+        assert repeated.id == repeated_id
+        assert repeated is not source
+        assert repeated.customer_id == source.customer_id
+        assert repeated.requested_robux == source.requested_robux
+        assert repeated.current_place_id == source.current_place_id
+        assert repeated.marketplace_rate_limit == source.marketplace_rate_limit
+        assert repeated.preferred_rate == source.preferred_rate
+        assert repeated.preferred_timeout_minutes == source.preferred_timeout_minutes
+        assert repeated.current_status is ClientOrderStatus.PREORDER
+        assert source.current_status is ClientOrderStatus.CANCELLED
+        assert [call.args[0].event_type for call in timeline.save.await_args_list] == [
+            TimelineEventType.ORDER_CREATED,
+            TimelineEventType.PAYMENT_CONFIRMED,
+            TimelineEventType.PREORDER_CREATED,
+        ]
+        workflows.start_purchase.assert_awaited_once_with(repeated_id)
+        assert result.order_id == repeated_id
+
+    asyncio.run(exercise())
+
+
+def test_repeat_order_blocks_recent_matching_active_or_completed_order() -> None:
+    async def exercise() -> None:
+        source = draft()
+        source.current_status = ClientOrderStatus.CANCELLED
+        customer = Customer(
+            id=source.customer_id,
+            roblox_user_id=42,
+            current_username="Builderman",
+            current_place_id=source.current_place_id,
+        )
+        orders = MagicMock()
+        orders.get_for_update = AsyncMock(return_value=source)
+        orders.find_recent_repeat_conflict = AsyncMock(return_value=draft())
+        orders.save = AsyncMock()
+        customers = MagicMock()
+        customers.get_for_update = AsyncMock(return_value=customer)
+        workflows = MagicMock()
+        workflows.start_purchase = AsyncMock()
+        service = OrderApplicationService(
+            TransactionFactory(),
+            marketplace_workflows=workflows,
+            operator_id=42,
+            clock=lambda: NOW,
+        )
+
+        with (
+            patch("sensflow.application.services.ClientOrderRepository", return_value=orders),
+            patch("sensflow.application.services.CustomerRepository", return_value=customers),
+            pytest.raises(
+                ConflictError,
+                match="Repeat is blocked to prevent duplicate purchases",
+            ),
+        ):
+            await service.repeat_order(OrderActionCommand(order_id=source.id, operator_id=42))
+
+        orders.save.assert_not_awaited()
+        workflows.start_purchase.assert_not_awaited()
+
+    asyncio.run(exercise())
+
+
+def test_repeat_action_is_exposed_only_for_the_supported_cancelled_state() -> None:
+    assert OrderAction.REPEAT in _order_actions(ClientOrderStatus.CANCELLED)
+    for status in (
+        ClientOrderStatus.DRAFT,
+        ClientOrderStatus.PREORDER,
+        ClientOrderStatus.PURCHASING,
+        ClientOrderStatus.COMPLETED,
+    ):
+        assert OrderAction.REPEAT not in _order_actions(status)
 
 
 def test_mutating_services_enforce_operator_authorization() -> None:

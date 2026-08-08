@@ -205,6 +205,14 @@ def test_active_and_preorder_screens_expose_direct_production_actions() -> None:
     assert "🔄 Requeue Now" in active_action_labels
     assert "⏸ Disable Auto Requeue" in active_action_labels
 
+    cancelled_keyboard = order_details_keyboard(
+        uuid4(),
+        ClientOrderStatus.CANCELLED,
+        (OrderAction.REPEAT, OrderAction.TIMELINE),
+    )
+    cancelled_labels = [button.text for row in cancelled_keyboard.inline_keyboard for button in row]
+    assert "🔁 Repeat order" in cancelled_labels
+
 
 def test_home_clears_state_and_close_deletes_the_screen() -> None:
     async def scenario() -> None:

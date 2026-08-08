@@ -87,6 +87,8 @@ class OrderUseCases(Protocol):
 
     async def refresh_order(self, command: OrderActionCommand) -> ActionResultDTO: ...
 
+    async def repeat_order(self, command: OrderActionCommand) -> ActionResultDTO: ...
+
 
 class CustomerUseCases(Protocol):
     """Customer operations available to presentation."""
