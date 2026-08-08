@@ -5,6 +5,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from sensflow.application.marketplace_workflows import (
+    _select_preorders_by_order_limit,
     _select_preorders_maximum_clients,
     _select_stock,
 )
@@ -123,4 +124,22 @@ def test_maximum_clients_strategy_fits_smallest_complete_preorders_first() -> No
     )
 
     assert selected == order_ids[:3]
+    assert selected_stock is stock[0]
+
+
+def test_automation_respects_each_orders_persisted_rate_limit() -> None:
+    preferred_order_id = uuid4()
+    fallback_order_id = uuid4()
+    stock = (_stock("4.4", total_robux_amount=500, max_instant_order=500),)
+
+    selected, selected_stock = _select_preorders_by_order_limit(
+        (
+            (preferred_order_id, 100, Decimal("4.1")),
+            (fallback_order_id, 100, Decimal("4.5")),
+        ),
+        stock,
+        minimum_purchase_rate=Decimal("0"),
+    )
+
+    assert selected == (fallback_order_id,)
     assert selected_stock is stock[0]

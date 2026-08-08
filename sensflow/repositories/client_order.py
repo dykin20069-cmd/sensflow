@@ -1,5 +1,6 @@
 """Client Order repository."""
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import String, cast, func, or_, select
@@ -85,6 +86,28 @@ class ClientOrderRepository(Repository[ClientOrder]):
             .where(ClientOrder.current_status == status)
         )
         return int(await self.session.scalar(statement) or 0)
+
+    async def list_expired_preferred_for_update(
+        self,
+        now: datetime,
+        *,
+        limit: int = 10_000,
+    ) -> list[ClientOrder]:
+        """Lock waiting orders whose preferred-rate window has elapsed."""
+        statement = (
+            select(ClientOrder)
+            .where(
+                ClientOrder.current_status == ClientOrderStatus.PREORDER,
+                ClientOrder.fallback_active.is_(False),
+                ClientOrder.preferred_expires_at.is_not(None),
+                ClientOrder.preferred_expires_at <= now,
+            )
+            .order_by(ClientOrder.preferred_expires_at, ClientOrder.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        result = await self.session.scalars(statement)
+        return list(result)
 
     async def status_counts(self) -> dict[ClientOrderStatus, int]:
         statement = select(ClientOrder.current_status, func.count()).group_by(

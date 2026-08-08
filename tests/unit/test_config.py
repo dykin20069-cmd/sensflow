@@ -27,6 +27,11 @@ def test_load_settings_parses_all_groups(valid_environment: dict[str, str]) -> N
     assert settings.rbxcrate.dry_run is False
     assert settings.marketplace.minimum_purchase_rate == Decimal("0")
     assert settings.marketplace.maximum_purchase_rate == Decimal("1.25")
+    assert settings.marketplace.preferred_purchase_rate == Decimal("1.10")
+    assert settings.marketplace.preferred_timeout_minutes == 35
+    assert settings.marketplace.low_balance_threshold == Decimal("10")
+    assert settings.marketplace.critical_balance_threshold == Decimal("5")
+    assert settings.marketplace.stock_notifications_enabled is True
     assert settings.automation.automatic_reorder_enabled is False
     assert settings.automation.auto_requeue_delay_seconds == Decimal("5")
     assert settings.finance.usd_exchange_rate == Decimal("90.50")
@@ -149,6 +154,19 @@ def test_purchase_rate_bounds_and_positive_intervals_fail_fast(
     valid_environment["AUTOMATIC_REORDER_INTERVAL_SECONDS"] = "0.3"
     valid_environment["AUTO_REQUEUE_DELAY_SECONDS"] = "0.2"
     with pytest.raises(ConfigurationError, match="auto_requeue_delay_seconds"):
+        load_settings(valid_environment)
+
+
+def test_v2_rate_and_balance_thresholds_are_validated(
+    valid_environment: dict[str, str],
+) -> None:
+    valid_environment["PREFERRED_PURCHASE_RATE"] = "1.5"
+    with pytest.raises(ConfigurationError, match="preferred purchase rate"):
+        load_settings(valid_environment)
+
+    valid_environment["PREFERRED_PURCHASE_RATE"] = "1.1"
+    valid_environment["CRITICAL_BALANCE_THRESHOLD"] = "11"
+    with pytest.raises(ConfigurationError, match="critical balance threshold"):
         load_settings(valid_environment)
 
 

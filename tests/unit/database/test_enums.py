@@ -42,6 +42,8 @@ from sensflow.infrastructure.database.enums import (
             NotificationType,
             [
                 "stock_available",
+                "low_balance",
+                "critical_balance",
                 "auto_requeue_started",
                 "auto_requeue_completed",
                 "auto_requeue_failed",

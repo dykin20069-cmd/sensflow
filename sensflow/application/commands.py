@@ -42,6 +42,19 @@ class CreateOrderCommand(PrepareCreateOrderCommand):
     roblox_user_id: int | None = Field(default=None, gt=0, le=POSTGRESQL_BIGINT_MAX)
     operator_id: int = Field(gt=0)
     allow_duplicate: bool = False
+    maximum_rate: Decimal | None = Field(default=None, gt=0)
+    preferred_rate: Decimal | None = Field(default=None, gt=0)
+    preferred_timeout_minutes: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_rate_policy(self) -> "CreateOrderCommand":
+        if (
+            self.maximum_rate is not None
+            and self.preferred_rate is not None
+            and self.preferred_rate > self.maximum_rate
+        ):
+            raise ValueError("preferred rate must not exceed maximum rate")
+        return self
 
 
 class OrderActionCommand(OperatorCommand):

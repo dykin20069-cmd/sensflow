@@ -82,14 +82,35 @@ class MarketplaceSettings(SettingsModel):
 
     minimum_purchase_rate: Decimal = Field(default=Decimal("0"), ge=0)
     maximum_purchase_rate: Decimal = Field(gt=0)
+    preferred_purchase_rate: Decimal = Field(default=Decimal("4.3"), gt=0)
+    preferred_timeout_minutes: int = Field(default=35, gt=0)
+    low_balance_threshold: Decimal = Field(default=Decimal("10"), ge=0)
+    critical_balance_threshold: Decimal = Field(default=Decimal("5"), ge=0)
+    stock_notifications_enabled: bool = True
     commission_rate: Decimal = Field(ge=0)
     stock_monitoring_interval_seconds: int = Field(gt=0)
     synchronization_interval_seconds: int = Field(gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_preferred_rate(cls, values: object) -> object:
+        if not isinstance(values, dict) or values.get("preferred_purchase_rate") is not None:
+            return values
+        maximum = values.get("maximum_purchase_rate")
+        try:
+            default = min(Decimal(str(maximum)), Decimal("4.3"))
+        except Exception:
+            return values
+        return {**values, "preferred_purchase_rate": default}
 
     @model_validator(mode="after")
     def validate_rate_range(self) -> "MarketplaceSettings":
         if self.maximum_purchase_rate < self.minimum_purchase_rate:
             raise ValueError("maximum purchase rate must be at least minimum purchase rate")
+        if self.preferred_purchase_rate > self.maximum_purchase_rate:
+            raise ValueError("preferred purchase rate must not exceed maximum purchase rate")
+        if self.critical_balance_threshold > self.low_balance_threshold:
+            raise ValueError("critical balance threshold must not exceed low balance threshold")
         return self
 
 
@@ -180,6 +201,11 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         "marketplace": {
             "minimum_purchase_rate": source.get("MIN_PURCHASE_RATE", "0"),
             "maximum_purchase_rate": source.get("MAX_PURCHASE_RATE"),
+            "preferred_purchase_rate": source.get("PREFERRED_PURCHASE_RATE"),
+            "preferred_timeout_minutes": source.get("PREFERRED_TIMEOUT_MINUTES", "35"),
+            "low_balance_threshold": source.get("LOW_BALANCE_THRESHOLD", "10"),
+            "critical_balance_threshold": source.get("CRITICAL_BALANCE_THRESHOLD", "5"),
+            "stock_notifications_enabled": source.get("STOCK_NOTIFICATIONS_ENABLED", "true"),
             "commission_rate": source.get("MARKETPLACE_COMMISSION_RATE"),
             "stock_monitoring_interval_seconds": source.get("STOCK_MONITORING_INTERVAL_SECONDS"),
             "synchronization_interval_seconds": source.get("MARKETPLACE_SYNC_INTERVAL_SECONDS")

@@ -282,7 +282,11 @@ def render_order_details(order: OrderDetailDTO) -> Screen:
         f"Customer receives: {format_robux(order.customer_receives)}\n"
         f"Place ID: <code>{order.current_place_id}</code>\n"
         f"Maximum rate: {format_decimal(order.marketplace_rate_limit)}\n"
+        f"Preferred rate: {format_decimal(order.preferred_rate)}\n"
+        f"Preferred timeout: {order.preferred_timeout_minutes or '—'} min\n"
+        f"Fallback active: {format_boolean(order.fallback_active)}\n"
         f"Marketplace rate: {format_decimal(order.marketplace_rate)}\n"
+        f"Executed rate: {format_decimal(order.executed_rate)}\n"
         f"Marketplace cost: {format_decimal(order.marketplace_cost)}\n"
         f"Marketplace commission: {format_decimal(order.marketplace_commission)}\n"
         f"Final cost USD: {format_decimal(order.final_cost_usd, ' USD')}\n"
@@ -313,6 +317,21 @@ def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Scree
     elif order.status is ClientOrderStatus.PREORDER:
         title = "⏳ PreOrder"
         remembered = "Yes" if order.remembered_place else "No"
+        waited_minutes = min(
+            (order.waiting_seconds or 0) // 60,
+            order.preferred_timeout_minutes or 0,
+        )
+        preferred_status = (
+            "🟠 Preferred timeout expired\n"
+            f"🔓 Fallback active up to {format_decimal(order.marketplace_rate_limit, '$')}"
+            if order.fallback_active
+            else (
+                f"🟡 Preferred: {format_decimal(order.preferred_rate, '$')}\n"
+                f"🔒 Max: {format_decimal(order.marketplace_rate_limit, '$')}\n"
+                f"⏳ Waiting: {waited_minutes}"
+                f" / {order.preferred_timeout_minutes or '—'} min"
+            )
+        )
         body = (
             f"👤 {escape_text(order.customer_username)}\n"
             f"🛒 {format_robux(order.requested_robux)}\n"
@@ -322,7 +341,7 @@ def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Scree
             f"in {format_decimal(order.next_automatic_retry_seconds, 's')}\n"
             f"Remembered place: {remembered}\n"
             "Priority: Maximum clients (smallest amount first)\n"
-            f"Stock limit: ≤ {format_decimal(order.marketplace_rate_limit, '$')}"
+            f"{preferred_status}"
         )
     else:
         title = f"📋 {humanize(order.status)} Order"
@@ -331,7 +350,8 @@ def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Scree
             f"💰 {format_robux(order.requested_robux)}\n"
             f"🎮 <code>{order.current_place_id}</code>\n"
             f"Status: {humanize(order.status)}\n"
-            f"Max rate: {format_decimal(order.marketplace_rate_limit, '$')}"
+            f"Max rate: {format_decimal(order.marketplace_rate_limit, '$')}\n"
+            f"Preferred: {format_decimal(order.preferred_rate, '$')}"
         )
     reference = (
         ""
@@ -490,9 +510,15 @@ def render_settings(settings: SettingsDTO | None) -> Screen:
             ", ".join(humanize(item) for item in settings.notification_categories) or "None"
         )
         body = (
-            "<b>Maximum Purchase Rate</b>\n"
-            "Highest RBXCrate rate that will be purchased automatically.\n"
-            f"Current: {format_decimal(settings.maximum_purchase_rate, '$')}\n\n"
+            "<b>⚙️ Purchase settings</b>\n"
+            f"Max rate: {format_decimal(settings.maximum_purchase_rate, '$')}\n"
+            f"Preferred rate: {format_decimal(settings.preferred_purchase_rate, '$')}\n"
+            f"Preferred timeout: {settings.preferred_timeout_minutes} min\n\n"
+            "<b>⚙️ Balance alerts</b>\n"
+            f"Low balance: {format_decimal(settings.low_balance_threshold, '$')}\n"
+            f"Critical balance: {format_decimal(settings.critical_balance_threshold, '$')}\n\n"
+            "<b>⚙️ Stock notifications</b>\n"
+            f"Enabled: {format_boolean(settings.stock_notifications_enabled)}\n\n"
             "<b>Marketplace Commission</b>\n"
             "Decimal fee rate applied to marketplace cost (0.05 = 5%).\n"
             f"Current: {format_decimal(settings.marketplace_commission)}\n\n"

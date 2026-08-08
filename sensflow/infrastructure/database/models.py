@@ -197,6 +197,19 @@ class ClientOrder(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("current_place_id > 0", name="current_place_id_positive"),
         CheckConstraint("marketplace_rate_limit > 0", name="marketplace_rate_limit_positive"),
         CheckConstraint(
+            "preferred_rate IS NULL OR "
+            "(preferred_rate > 0 AND preferred_rate <= marketplace_rate_limit)",
+            name="preferred_rate_valid",
+        ),
+        CheckConstraint(
+            "preferred_timeout_minutes IS NULL OR preferred_timeout_minutes > 0",
+            name="preferred_timeout_positive",
+        ),
+        CheckConstraint(
+            "executed_rate IS NULL OR executed_rate > 0",
+            name="executed_rate_positive",
+        ),
+        CheckConstraint(
             "marketplace_cost IS NULL OR marketplace_cost >= 0",
             name="marketplace_cost_nonnegative",
         ),
@@ -251,6 +264,16 @@ class ClientOrder(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Numeric(RATE_PRECISION, RATE_SCALE),
         nullable=False,
     )
+    preferred_rate: Mapped[Decimal | None] = mapped_column(Numeric(RATE_PRECISION, RATE_SCALE))
+    preferred_timeout_minutes: Mapped[int | None] = mapped_column(Integer)
+    preferred_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fallback_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    executed_rate: Mapped[Decimal | None] = mapped_column(Numeric(RATE_PRECISION, RATE_SCALE))
     marketplace_cost: Mapped[Decimal | None] = mapped_column(Numeric(MONEY_PRECISION, MONEY_SCALE))
     marketplace_commission: Mapped[Decimal | None] = mapped_column(
         Numeric(MONEY_PRECISION, MONEY_SCALE)
@@ -501,6 +524,23 @@ class SystemSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("maximum_purchase_rate > 0", name="maximum_purchase_rate_positive"),
         CheckConstraint(
+            "preferred_purchase_rate > 0 AND preferred_purchase_rate <= maximum_purchase_rate",
+            name="preferred_purchase_rate_valid",
+        ),
+        CheckConstraint(
+            "preferred_timeout_minutes > 0",
+            name="preferred_timeout_positive",
+        ),
+        CheckConstraint(
+            "low_balance_threshold >= 0",
+            name="low_balance_threshold_nonnegative",
+        ),
+        CheckConstraint(
+            "critical_balance_threshold >= 0 "
+            "AND critical_balance_threshold <= low_balance_threshold",
+            name="critical_balance_threshold_valid",
+        ),
+        CheckConstraint(
             "automatic_reorder_interval_seconds >= 0.3",
             name="reorder_interval_minimum",
         ),
@@ -527,6 +567,36 @@ class SystemSettings(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     maximum_purchase_rate: Mapped[Decimal] = mapped_column(
         Numeric(RATE_PRECISION, RATE_SCALE),
         nullable=False,
+    )
+    preferred_purchase_rate: Mapped[Decimal] = mapped_column(
+        Numeric(RATE_PRECISION, RATE_SCALE),
+        nullable=False,
+        default=Decimal("4.3"),
+        server_default=text("4.3"),
+    )
+    preferred_timeout_minutes: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=35,
+        server_default=text("35"),
+    )
+    low_balance_threshold: Mapped[Decimal] = mapped_column(
+        Numeric(MONEY_PRECISION, MONEY_SCALE),
+        nullable=False,
+        default=Decimal("10"),
+        server_default=text("10"),
+    )
+    critical_balance_threshold: Mapped[Decimal] = mapped_column(
+        Numeric(MONEY_PRECISION, MONEY_SCALE),
+        nullable=False,
+        default=Decimal("5"),
+        server_default=text("5"),
+    )
+    stock_notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
     )
     automatic_reorder_enabled: Mapped[bool] = mapped_column(
         Boolean,

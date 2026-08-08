@@ -81,6 +81,11 @@ def settings_row() -> SystemSettings:
     return SystemSettings(
         id=uuid4(),
         maximum_purchase_rate=Decimal("1.25"),
+        preferred_purchase_rate=Decimal("1.00"),
+        preferred_timeout_minutes=35,
+        low_balance_threshold=Decimal("10"),
+        critical_balance_threshold=Decimal("5"),
+        stock_notifications_enabled=True,
         automatic_reorder_enabled=True,
         automatic_reorder_interval_seconds=300,
         auto_requeue_delay_seconds=Decimal("5"),
@@ -275,6 +280,8 @@ def test_create_order_persists_manual_customer_and_draft_without_roblox_lookup()
         assert created.customer_id == customer_id
         assert created.current_status is ClientOrderStatus.DRAFT
         assert created.marketplace_rate_limit == Decimal("1.25")
+        assert created.preferred_rate == Decimal("1.00")
+        assert created.preferred_timeout_minutes == 35
         assert event.event_type is TimelineEventType.ORDER_CREATED
         assert str(order_id) in result.message
         assert result.order_id == order_id
@@ -510,6 +517,7 @@ def test_purchase_completion_captures_finance_and_is_idempotent() -> None:
         assert order.marketplace_commission == Decimal("0.5000")
         assert order.final_cost_usd == Decimal("10.5000")
         assert order.final_cost_local_currency == Decimal("945.0000")
+        assert order.executed_rate == Decimal("105.00000000")
         assert attempt.marketplace_status is MarketplaceOrderStatus.COMPLETED
         assert timeline.save.await_count == 2
 

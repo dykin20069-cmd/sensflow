@@ -7,6 +7,8 @@ class SettingField(StrEnum):
     """System Settings fields editable by the Version 1 operator."""
 
     MAXIMUM_PURCHASE_RATE = "maximum_purchase_rate"
+    PREFERRED_PURCHASE_RATE = "preferred_purchase_rate"
+    PREFERRED_TIMEOUT_MINUTES = "preferred_timeout_minutes"
     MARKETPLACE_COMMISSION = "marketplace_commission"
     USD_EXCHANGE_RATE = "usd_exchange_rate"
     AUTOMATIC_REORDER_ENABLED = "automatic_reorder_enabled"
@@ -15,6 +17,9 @@ class SettingField(StrEnum):
     MARKETPLACE_MONITORING_INTERVAL_SECONDS = "marketplace_monitoring_interval_seconds"
     SYNCHRONIZATION_INTERVAL_SECONDS = "synchronization_interval_seconds"
     TELEGRAM_NOTIFICATIONS_ENABLED = "telegram_notifications_enabled"
+    STOCK_NOTIFICATIONS_ENABLED = "stock_notifications_enabled"
+    LOW_BALANCE_THRESHOLD = "low_balance_threshold"
+    CRITICAL_BALANCE_THRESHOLD = "critical_balance_threshold"
     NOTIFICATION_CATEGORIES = "notification_categories"
     APPLICATION_TIMEZONE = "application_timezone"
 
@@ -49,6 +54,8 @@ class TimelineEventType(StrEnum):
 
 class NotificationType(StrEnum):
     STOCK_AVAILABLE = "stock_available"
+    LOW_BALANCE = "low_balance"
+    CRITICAL_BALANCE = "critical_balance"
     AUTO_REQUEUE_STARTED = "auto_requeue_started"
     AUTO_REQUEUE_COMPLETED = "auto_requeue_completed"
     AUTO_REQUEUE_FAILED = "auto_requeue_failed"

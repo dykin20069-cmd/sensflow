@@ -85,6 +85,7 @@ from sensflow.domain.errors import DomainConflictError, DomainValidationError
 from sensflow.domain.finance.service import (
     calculate_customer_receives,
     calculate_financial_snapshot,
+    create_purchase_result,
 )
 from sensflow.domain.marketplace.service import (
     cancel_marketplace_order,
@@ -242,6 +243,11 @@ def _order_detail(
         ),
         current_place_id=order.current_place_id,
         marketplace_rate_limit=order.marketplace_rate_limit,
+        preferred_rate=order.preferred_rate,
+        preferred_timeout_minutes=order.preferred_timeout_minutes,
+        preferred_expires_at=order.preferred_expires_at,
+        fallback_active=order.fallback_active is True,
+        executed_rate=order.executed_rate,
         marketplace_cost=order.marketplace_cost,
         marketplace_commission=order.marketplace_commission,
         final_cost_usd=order.final_cost_usd,
@@ -314,6 +320,11 @@ def _customer_detail(customer: Customer) -> CustomerDetailDTO:
 def _settings(settings: SystemSettings) -> SettingsDTO:
     return SettingsDTO(
         maximum_purchase_rate=settings.maximum_purchase_rate,
+        preferred_purchase_rate=settings.preferred_purchase_rate,
+        preferred_timeout_minutes=settings.preferred_timeout_minutes,
+        low_balance_threshold=settings.low_balance_threshold,
+        critical_balance_threshold=settings.critical_balance_threshold,
+        stock_notifications_enabled=settings.stock_notifications_enabled,
         automatic_reorder_enabled=settings.automatic_reorder_enabled,
         automatic_reorder_interval_seconds=settings.automatic_reorder_interval_seconds,
         auto_requeue_delay_seconds=settings.auto_requeue_delay_seconds,
@@ -595,12 +606,19 @@ class OrderApplicationService:
                 )
                 if similar is not None:
                     raise ConflictError(f"Similar active order {similar.id} already exists")
+            maximum_rate = command.maximum_rate or settings.maximum_purchase_rate
+            preferred_rate = command.preferred_rate or min(
+                settings.preferred_purchase_rate,
+                maximum_rate,
+            )
             order = await orders.save(
                 create_draft(
                     customer,
                     command.requested_robux,
                     command.place_id,
-                    settings.maximum_purchase_rate,
+                    maximum_rate,
+                    preferred_rate,
+                    command.preferred_timeout_minutes or settings.preferred_timeout_minutes,
                 )
             )
             await TimelineEventRepository(session).save(
@@ -677,7 +695,7 @@ class OrderApplicationService:
                     )
                 )
                 if not stock_available:
-                    enter_preorder(order)
+                    enter_preorder(order, event_time)
                     await orders.save(order)
                     await timeline.save(
                         create_timeline_event(
@@ -764,7 +782,7 @@ class OrderApplicationService:
                         now,
                     )
                 )
-                enter_preorder(order)
+                enter_preorder(order, now)
                 await orders.save(order)
                 await timeline.save(
                     create_timeline_event(
@@ -853,6 +871,11 @@ class OrderApplicationService:
                     money_quantum=command.money_quantum,
                     rounding=command.money_rounding,
                 )
+                purchase_result = create_purchase_result(
+                    requested_rate=attempt.purchase_rate,
+                    purchased_robux=command.purchased_robux,
+                    financials=financials,
+                )
                 now = self._clock()
                 complete_marketplace_order(
                     attempt,
@@ -868,6 +891,7 @@ class OrderApplicationService:
                     final_cost_local_currency=financials.final_cost_local_currency,
                     usd_exchange_rate=financials.usd_exchange_rate,
                     now=now,
+                    executed_rate=purchase_result.executed_rate,
                 )
                 await marketplace_orders.save(attempt)
                 await orders.save(order)

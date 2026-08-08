@@ -2,18 +2,23 @@
 
 import asyncio
 import logging
+from collections.abc import Callable
 from contextlib import suppress
+from datetime import datetime, timedelta
 from decimal import Decimal
 from html import escape
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from sensflow.application.marketplace_workflows import MarketplaceWorkflows
+from sensflow.application.errors import MarketplaceIntegrationError
+from sensflow.application.marketplace_workflows import AutomationStockPlan, MarketplaceWorkflows
 from sensflow.application.notifications import NotificationService
 from sensflow.application.rbxcreate_bridge import MarketplaceStock
 from sensflow.domain.enums import ClientOrderStatus, MarketplaceOrderStatus, NotificationType
+from sensflow.domain.order.service import effective_purchase_rate
 from sensflow.domain.settings.service import SettingsDefaults, create_settings
+from sensflow.infrastructure.database.base import utc_now
 from sensflow.infrastructure.database.models import SystemSettings
 from sensflow.repositories import (
     ClientOrderRepository,
@@ -24,7 +29,13 @@ from sensflow.repositories import (
 logger = logging.getLogger(__name__)
 
 SessionFactory = async_sessionmaker[AsyncSession]
-STOCK_NOTIFICATION_COOLDOWN_SECONDS = 60
+PREFERRED_TIMEOUT_INTERVAL_SECONDS = 30
+BALANCE_MONITOR_INTERVAL_SECONDS = 5 * 60
+BALANCE_NOTIFICATION_COOLDOWN_SECONDS = 60 * 60
+STOCK_NOTIFICATION_INTERVAL_SECONDS = 15
+STOCK_NOTIFICATION_COOLDOWN_SECONDS = 10 * 60
+STOCK_NOTIFICATION_GROWTH_FACTOR = Decimal("1.20")
+Clock = Callable[[], datetime]
 
 
 class AutomationLoop:
@@ -37,14 +48,16 @@ class AutomationLoop:
         *,
         settings_defaults: SettingsDefaults | None = None,
         notifications: NotificationService | None = None,
+        clock: Clock = utc_now,
     ) -> None:
         self._sessions = sessions
         self._workflows = workflows
         self._settings_defaults = settings_defaults
         self._notifications = notifications
+        self._clock = clock
         self._shutdown = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
-        self._visible_stock_rates: set[Decimal] = set()
+        self._stock_notification_state: dict[Decimal, tuple[datetime, int]] = {}
 
     async def start(self) -> None:
         """Start the loop once without blocking application startup."""
@@ -111,13 +124,49 @@ class AutomationLoop:
 
     async def run_reorder_pass(self) -> None:
         """Notify stock, maximize completed PreOrders, and safely requeue active attempts."""
-        await self._run_stock_pass(process_preorders=True, process_active=True)
+        await self._run_stock_pass(
+            process_preorders=True,
+            process_active=True,
+            process_notifications=True,
+        )
+
+    async def run_balance_monitor_pass(self) -> None:
+        """Queue threshold alerts with a persisted one-hour notification cooldown."""
+        settings = await self._get_settings()
+        if self._notifications is None or not settings.telegram_notifications_enabled:
+            return
+        try:
+            balance = await self._workflows.get_balance()
+        except MarketplaceIntegrationError:
+            logger.warning("balance_monitor_unavailable")
+            return
+        critical = settings.critical_balance_threshold or Decimal("5")
+        low = settings.low_balance_threshold or Decimal("10")
+        if (
+            balance <= critical
+            and NotificationType.CRITICAL_BALANCE in settings.notification_categories
+        ):
+            await self._notifications.queue_once(
+                notification_type=NotificationType.CRITICAL_BALANCE,
+                title="Critical RBXCrate balance",
+                message=_critical_balance_message(balance),
+                throttle_seconds=BALANCE_NOTIFICATION_COOLDOWN_SECONDS,
+            )
+        elif balance <= low and NotificationType.LOW_BALANCE in settings.notification_categories:
+            await self._notifications.queue_once(
+                notification_type=NotificationType.LOW_BALANCE,
+                title="Low RBXCrate balance",
+                message=_low_balance_message(balance, low),
+                throttle_seconds=BALANCE_NOTIFICATION_COOLDOWN_SECONDS,
+            )
+        await self._notifications.deliver_pending()
 
     async def _run_stock_pass(
         self,
         *,
         process_preorders: bool,
         process_active: bool,
+        process_notifications: bool = True,
     ) -> None:
         """Use one stock snapshot for whichever automation schedules are due."""
         async with self._sessions() as session:
@@ -138,45 +187,15 @@ class AutomationLoop:
                 if process_active
                 else []
             )
-        candidates = tuple((order.id, order.requested_robux) for order in orders)
+        now = self._clock()
+        candidates = tuple(
+            (order.id, order.requested_robux, effective_purchase_rate(order, now))
+            for order in orders
+        )
         plan = await self._workflows.plan_automation(candidates)
         settings = await self._get_settings()
-        visible_rates = {
-            stock.rate
-            for stock in plan.stock
-            if plan.minimum_purchase_rate <= stock.rate <= plan.maximum_purchase_rate
-            and stock.max_instant_order > 0
-            and stock.total_robux_amount > 0
-        }
-        new_rates = visible_rates - self._visible_stock_rates if process_preorders else set()
-        if process_preorders:
-            for stock in plan.stock:
-                if stock.rate in new_rates:
-                    logger.info(
-                        "stock_detected",
-                        extra={
-                            "rate": str(stock.rate),
-                            "total_robux": stock.total_robux_amount,
-                            "available": stock.total_robux_amount,
-                            "max_instant": stock.max_instant_order,
-                        },
-                    )
-            self._visible_stock_rates = visible_rates
-        if (
-            process_preorders
-            and self._notifications is not None
-            and settings.telegram_notifications_enabled
-            and NotificationType.STOCK_AVAILABLE in settings.notification_categories
-        ):
-            for stock in plan.stock:
-                if stock.rate not in new_rates:
-                    continue
-                await self._notifications.queue_once(
-                    notification_type=NotificationType.STOCK_AVAILABLE,
-                    title=f"Suitable stock detected · {stock.rate.normalize()}",
-                    message=_stock_appeared_message(stock, len(plan.order_ids)),
-                    throttle_seconds=STOCK_NOTIFICATION_COOLDOWN_SECONDS,
-                )
+        if process_notifications:
+            await self._queue_stock_notifications(plan, settings, now)
         for order_id in plan.order_ids if process_preorders else ():
             try:
                 await self._workflows.start_purchase(order_id)
@@ -242,6 +261,54 @@ class AutomationLoop:
         if self._notifications is not None:
             await self._notifications.deliver_pending()
 
+    async def _queue_stock_notifications(
+        self,
+        plan: AutomationStockPlan,
+        settings: SystemSettings,
+        now: datetime,
+    ) -> None:
+        if (
+            self._notifications is None
+            or not settings.telegram_notifications_enabled
+            or settings.stock_notifications_enabled is False
+            or NotificationType.STOCK_AVAILABLE not in settings.notification_categories
+        ):
+            return
+        for stock in plan.stock:
+            if not (
+                plan.minimum_purchase_rate <= stock.rate <= plan.maximum_purchase_rate
+                and stock.max_instant_order > 0
+            ):
+                continue
+            previous = self._stock_notification_state.get(stock.rate)
+            cooldown_elapsed = previous is None or now - previous[0] >= timedelta(
+                seconds=STOCK_NOTIFICATION_COOLDOWN_SECONDS
+            )
+            volume_grew = (
+                previous is not None
+                and Decimal(stock.total_robux_amount)
+                >= Decimal(previous[1]) * STOCK_NOTIFICATION_GROWTH_FACTOR
+            )
+            if not cooldown_elapsed and not volume_grew:
+                continue
+            logger.info(
+                "stock_detected",
+                extra={
+                    "rate": str(stock.rate),
+                    "available": stock.total_robux_amount,
+                    "max_instant": stock.max_instant_order,
+                },
+            )
+            await self._notifications.queue(
+                notification_type=NotificationType.STOCK_AVAILABLE,
+                title=f"Stock appeared · {stock.rate.normalize()}",
+                message=_stock_appeared_message(stock, plan.maximum_purchase_rate),
+            )
+            self._stock_notification_state[stock.rate] = (
+                now,
+                stock.total_robux_amount,
+            )
+
     async def _queue_marketplace_error(
         self,
         order_id: object,
@@ -264,6 +331,9 @@ class AutomationLoop:
         next_sync = 0.0
         next_monitoring = 0.0
         next_reorder = 0.0
+        next_preferred_timeout = 0.0
+        next_balance_monitor = 0.0
+        next_stock_notification = 0.0
         while not self._shutdown.is_set():
             try:
                 settings = await self._get_settings()
@@ -271,14 +341,21 @@ class AutomationLoop:
                 if now >= next_sync:
                     await self.run_synchronization_pass()
                     next_sync = loop.time() + settings.synchronization_interval_seconds
+                if now >= next_preferred_timeout:
+                    await self._workflows.activate_expired_fallbacks()
+                    next_preferred_timeout = loop.time() + PREFERRED_TIMEOUT_INTERVAL_SECONDS
+                if now >= next_balance_monitor:
+                    await self.run_balance_monitor_pass()
+                    next_balance_monitor = loop.time() + BALANCE_MONITOR_INTERVAL_SECONDS
                 monitoring_due = now >= next_monitoring
                 requeue_due = now >= next_reorder
-                if monitoring_due or requeue_due:
-                    if settings.automatic_reorder_enabled:
-                        await self._run_stock_pass(
-                            process_preorders=monitoring_due,
-                            process_active=requeue_due,
-                        )
+                stock_notification_due = now >= next_stock_notification
+                if monitoring_due or requeue_due or stock_notification_due:
+                    await self._run_stock_pass(
+                        process_preorders=(monitoring_due and settings.automatic_reorder_enabled),
+                        process_active=requeue_due and settings.automatic_reorder_enabled,
+                        process_notifications=stock_notification_due,
+                    )
                     scheduled_at = loop.time()
                     if monitoring_due:
                         next_monitoring = (
@@ -288,9 +365,19 @@ class AutomationLoop:
                         next_reorder = scheduled_at + float(
                             settings.automatic_reorder_interval_seconds
                         )
+                    if stock_notification_due:
+                        next_stock_notification = scheduled_at + STOCK_NOTIFICATION_INTERVAL_SECONDS
                 delay = max(
                     0.0,
-                    min(next_sync, next_monitoring, next_reorder) - loop.time(),
+                    min(
+                        next_sync,
+                        next_monitoring,
+                        next_reorder,
+                        next_preferred_timeout,
+                        next_balance_monitor,
+                        next_stock_notification,
+                    )
+                    - loop.time(),
                 )
             except Exception:
                 logger.exception("automation_iteration_failed")
@@ -309,16 +396,30 @@ class AutomationLoop:
             return await repository.save(create_settings(self._settings_defaults))
 
 
-def _stock_appeared_message(stock: MarketplaceStock, matching_preorders: int = 0) -> str:
-    preferred = "\n🎯 Preferred stock detected (≤ 4.3$)" if stock.rate <= Decimal("4.3") else ""
+def _stock_appeared_message(stock: MarketplaceStock, maximum_rate: Decimal) -> str:
     return (
-        "<b>🟢 Suitable stock detected</b>\n\n"
+        "<b>🟢 Stock appeared</b>\n\n"
         f"Rate: {stock.rate.normalize()}$\n"
-        f"Accounts: {stock.accounts_count:,}\n"
         f"Available: {stock.total_robux_amount:,} R$\n"
-        f"Max instant: {stock.max_instant_order:,} R$\n"
-        f"{matching_preorders} matching PreOrders will be processed automatically."
-        f"{preferred}"
+        f"Instant: {stock.max_instant_order:,} R$\n"
+        f"Suitable for the current limit ≤ {maximum_rate.normalize()}$."
+    )
+
+
+def _low_balance_message(balance: Decimal, threshold: Decimal) -> str:
+    return (
+        "<b>⚠️ Low RBXCrate balance</b>\n\n"
+        f"Current balance: ${balance:.2f}\n"
+        f"Threshold: ${threshold:.2f}\n"
+        "Top up the balance to avoid stopping automatic purchases."
+    )
+
+
+def _critical_balance_message(balance: Decimal) -> str:
+    return (
+        "<b>🚨 Critical RBXCrate balance</b>\n\n"
+        f"Current balance: ${balance:.2f}\n"
+        "Automatic orders may not be fulfilled."
     )
 
 

@@ -19,6 +19,40 @@ class FinancialSnapshot:
     usd_exchange_rate: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class PurchaseResult:
+    """Actual immutable purchase values used by persistence and notifications."""
+
+    requested_rate: Decimal
+    executed_rate: Decimal
+    marketplace_price_usd: Decimal
+    commission_usd: Decimal
+    total_paid_usd: Decimal
+
+
+def create_purchase_result(
+    *,
+    requested_rate: Decimal,
+    purchased_robux: int,
+    financials: FinancialSnapshot,
+) -> PurchaseResult:
+    """Derive the effective paid rate from the final historical USD total."""
+    _validate_decimal(requested_rate, "Requested rate", allow_zero=False)
+    if purchased_robux <= 0:
+        raise DomainValidationError("Purchased Robux must be greater than zero")
+    executed_rate = (
+        financials.final_cost_usd * Decimal("1000") / Decimal(purchased_robux)
+    ).quantize(Decimal("0.00000001"))
+    _validate_decimal(executed_rate, "Executed rate", allow_zero=False)
+    return PurchaseResult(
+        requested_rate=requested_rate,
+        executed_rate=executed_rate,
+        marketplace_price_usd=financials.marketplace_cost,
+        commission_usd=financials.marketplace_commission,
+        total_paid_usd=financials.final_cost_usd,
+    )
+
+
 def record_observed_marketplace_cost(order: ClientOrder, cost: Decimal) -> None:
     """Store a provisional price only while a purchase attempt is active."""
     if order.current_status is not ClientOrderStatus.PURCHASING:

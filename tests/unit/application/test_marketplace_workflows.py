@@ -22,6 +22,7 @@ from sensflow.application.rbxcreate_bridge import (
     MarketplaceSyncResult,
 )
 from sensflow.domain.enums import ClientOrderStatus, MarketplaceOrderStatus
+from sensflow.domain.finance.service import PurchaseResult
 from sensflow.infrastructure.database.models import (
     ClientOrder,
     Customer,
@@ -100,6 +101,7 @@ def _order(customer: Customer, status: ClientOrderStatus) -> ClientOrder:
         current_status=status,
         current_place_id=77,
         marketplace_rate_limit=Decimal("2.50"),
+        fallback_active=False,
     )
     order.id = uuid4()
     return order
@@ -174,6 +176,11 @@ def _wire(
 
     settings = SystemSettings(
         maximum_purchase_rate=maximum_purchase_rate,
+        preferred_purchase_rate=min(maximum_purchase_rate, Decimal("4.3")),
+        preferred_timeout_minutes=35,
+        low_balance_threshold=Decimal("10"),
+        critical_balance_threshold=Decimal("5"),
+        stock_notifications_enabled=True,
         automatic_reorder_enabled=True,
         automatic_reorder_interval_seconds=60,
         auto_requeue_delay_seconds=Decimal("5"),
@@ -233,12 +240,14 @@ def test_start_purchase_chooses_lowest_valid_rate_and_skips_overpriced(monkeypat
     asyncio.run(scenario())
 
 
-def test_start_purchase_uses_current_rate_limit_for_existing_draft(monkeypatch: Any) -> None:
+def test_start_purchase_preserves_the_order_rate_policy_snapshot(monkeypatch: Any) -> None:
     async def scenario() -> None:
         customer = _customer()
         order = _order(customer, ClientOrderStatus.DRAFT)
         order.requested_robux = 100
-        order.marketplace_rate_limit = Decimal("1.00")
+        order.marketplace_rate_limit = Decimal("4.4")
+        order.preferred_rate = Decimal("4.3")
+        order.preferred_timeout_minutes = 35
         state = _wire(
             monkeypatch,
             customer=customer,
@@ -262,7 +271,7 @@ def test_start_purchase_uses_current_rate_limit_for_existing_draft(monkeypatch: 
         result = await workflows.start_purchase(order.id)
 
         assert result.message == "Purchase started via RBXCrate."
-        assert order.marketplace_rate_limit == Decimal("4.5")
+        assert order.marketplace_rate_limit == Decimal("4.4")
         assert state.saved_marketplace[-1].purchase_rate == Decimal("4.2")
 
     asyncio.run(scenario())
@@ -283,6 +292,47 @@ def test_start_purchase_moves_order_to_preorder_when_stock_is_insufficient(
         assert "PreOrder" in result.message
         assert order.current_status is ClientOrderStatus.PREORDER
         assert bridge.create_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_preferred_rate_defers_then_uses_maximum_after_timeout(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.DRAFT)
+        order.requested_robux = 100
+        order.marketplace_rate_limit = Decimal("4.5")
+        order.preferred_rate = Decimal("4.1")
+        order.preferred_timeout_minutes = 35
+        state = _wire(
+            monkeypatch,
+            customer=customer,
+            order=order,
+            maximum_purchase_rate=Decimal("4.5"),
+        )
+        bridge = Bridge(stock=(MarketplaceStock(Decimal("4.2"), 3, 427, 1325),))
+        current_time = [NOW]
+        workflows = MarketplaceWorkflows(
+            Sessions(),
+            bridge,
+            clock=lambda: current_time[0],
+        )  # type: ignore[arg-type]
+
+        waiting = await workflows.start_purchase(order.id)
+
+        assert order.current_status is ClientOrderStatus.PREORDER
+        assert order.preferred_expires_at == NOW + timedelta(minutes=35)
+        assert order.fallback_active is False
+        assert "PreOrder" in waiting.message
+        assert bridge.create_calls == []
+
+        current_time[0] = NOW + timedelta(minutes=35)
+        started = await workflows.start_purchase(order.id)
+
+        assert started.message == "Purchase started via RBXCrate."
+        assert order.fallback_active is True
+        assert order.current_status is ClientOrderStatus.PURCHASING
+        assert state.saved_marketplace[-1].purchase_rate == Decimal("4.2")
 
     asyncio.run(scenario())
 
@@ -510,6 +560,7 @@ def test_synchronization_completes_exactly_once(monkeypatch: Any) -> None:
         assert order.current_status is ClientOrderStatus.COMPLETED
         assert attempt.marketplace_status is MarketplaceOrderStatus.COMPLETED
         assert order.marketplace_cost == Decimal("10.0000")
+        assert order.executed_rate == Decimal("11.00000000")
 
     asyncio.run(scenario())
 
@@ -551,6 +602,7 @@ def test_purchase_completed_notification_uses_persisted_financial_snapshot() -> 
     order.marketplace_commission = Decimal("0.0200")
     order.final_cost_usd = Decimal("0.4100")
     order.final_cost_local_currency = Decimal("36.9000")
+    order.preferred_rate = Decimal("3.9")
     attempt = _attempt(order)
     attempt.marketplace_status = MarketplaceOrderStatus.COMPLETED
     attempt.purchase_rate = Decimal("3.9")
@@ -563,11 +615,20 @@ def test_purchase_completed_notification_uses_persisted_financial_snapshot() -> 
         attempt,
         "viki_show2010435",
         Decimal("0.05"),
+        PurchaseResult(
+            requested_rate=Decimal("3.9"),
+            executed_rate=Decimal("4.1"),
+            marketplace_price_usd=Decimal("0.39"),
+            commission_usd=Decimal("0.02"),
+            total_paid_usd=Decimal("0.41"),
+        ),
     )
 
     assert "Purchased: 100 R$" in message
     assert "Client receives: 70 R$" in message
-    assert "Rate: 3.9$" in message
+    assert "Preferred trigger: 3.9$" in message
+    assert "Executed rate: 4.1$" in message
+    assert "Executed above preferred rate" in message
     assert "Marketplace price: $0.39" in message
     assert "commission: $0.02" in message
     assert "Total paid: $0.41" in message

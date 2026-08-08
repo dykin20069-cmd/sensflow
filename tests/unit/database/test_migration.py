@@ -18,15 +18,17 @@ def test_migration_chain_has_nullable_customer_identity_revision() -> None:
     revisions = list(scripts.walk_revisions())
 
     assert [item.revision for item in revisions] == [
+        "20260808_0005",
         "20260807_0004",
         "20260807_0003",
         "20260807_0002",
         "20260806_0001",
     ]
-    assert revisions[0].down_revision == "20260807_0003"
-    assert revisions[1].down_revision == "20260807_0002"
-    assert revisions[2].down_revision == "20260806_0001"
-    assert revisions[3].down_revision is None
+    assert revisions[0].down_revision == "20260807_0004"
+    assert revisions[1].down_revision == "20260807_0003"
+    assert revisions[2].down_revision == "20260807_0002"
+    assert revisions[3].down_revision == "20260806_0001"
+    assert revisions[4].down_revision is None
 
 
 def test_initial_migration_renders_complete_upgrade_sql() -> None:
@@ -71,6 +73,15 @@ def test_initial_migration_renders_complete_upgrade_sql() -> None:
     assert "auto_requeue_delay_seconds >= 0.3" in sql
     assert "marketplace_commission = marketplace_commission / 100" in sql
     assert "marketplace_commission >= 0 AND marketplace_commission <= 1" in sql
+    assert "ADD VALUE IF NOT EXISTS 'low_balance'" in sql
+    assert "ADD VALUE IF NOT EXISTS 'critical_balance'" in sql
+    assert "ADD COLUMN preferred_rate NUMERIC(20, 8)" in sql
+    assert "ADD COLUMN executed_rate NUMERIC(20, 8)" in sql
+    assert "WHERE current_status <> 'completed'" in sql
+    assert "SET executed_rate = final_cost_usd" not in sql
+    assert "ADD COLUMN preferred_purchase_rate NUMERIC(20, 8)" in sql
+    assert "preferred_purchase_rate > 0" in sql
+    assert "critical_balance_threshold <= low_balance_threshold" in sql
     assert "CREATE UNIQUE INDEX uq_system_settings_singleton" in sql
     assert sql.count("CREATE FUNCTION reject_protected_row_change()") == 1
     for trigger_name in (
@@ -140,3 +151,19 @@ def test_final_v1_migration_has_guarded_notification_downgrade() -> None:
     assert "DROP COLUMN auto_requeue_delay_seconds" in sql
     assert "DROP COLUMN automatic_requeue_enabled" in sql
     assert "DROP TYPE notification_type_final_v1" in sql
+
+
+def test_v2_1_migration_has_safe_backfill_and_guarded_downgrade() -> None:
+    output = StringIO()
+
+    command.downgrade(
+        alembic_config(output),
+        "20260808_0005:20260807_0004",
+        sql=True,
+    )
+
+    sql = output.getvalue()
+    assert "Cannot downgrade while V2.1 notification rows exist" in sql
+    assert "DROP COLUMN executed_rate" in sql
+    assert "DROP COLUMN preferred_purchase_rate" in sql
+    assert "DROP TYPE notification_type_v2_1" in sql

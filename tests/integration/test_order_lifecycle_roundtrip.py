@@ -84,6 +84,11 @@ def test_complete_order_lifecycle_roundtrip(postgresql_url: str) -> None:
                 await SystemSettingsRepository(session).save(
                     SystemSettings(
                         maximum_purchase_rate=Decimal("2"),
+                        preferred_purchase_rate=Decimal("1.5"),
+                        preferred_timeout_minutes=35,
+                        low_balance_threshold=Decimal("10"),
+                        critical_balance_threshold=Decimal("5"),
+                        stock_notifications_enabled=True,
                         automatic_reorder_enabled=True,
                         automatic_reorder_interval_seconds=60,
                         auto_requeue_delay_seconds=Decimal("5"),

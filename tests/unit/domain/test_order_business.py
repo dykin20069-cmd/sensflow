@@ -1,6 +1,6 @@
 """ClientOrder state, Draft, completion, and timeline tests."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -9,10 +9,13 @@ import pytest
 from sensflow.domain.enums import ClientOrderStatus, TimelineEventType
 from sensflow.domain.errors import DomainConflictError
 from sensflow.domain.order.service import (
+    activate_fallback,
     cancel_order,
     complete_order,
     create_draft,
     edit_draft,
+    effective_purchase_rate,
+    enter_preorder,
 )
 from sensflow.domain.order.state_machine import ALLOWED_TRANSITIONS, validate_transition
 from sensflow.domain.order.timeline import create_timeline_event
@@ -64,6 +67,26 @@ def test_draft_creation_and_editing_are_limited_to_draft_state() -> None:
     draft.current_status = ClientOrderStatus.PREORDER
     with pytest.raises(DomainConflictError):
         edit_draft(draft, requested_robux=200)
+
+
+def test_preferred_rate_waits_then_activates_the_hard_limit() -> None:
+    draft = create_draft(
+        customer(),
+        100,
+        200,
+        Decimal("4.5"),
+        Decimal("4.1"),
+        35,
+    )
+
+    enter_preorder(draft, NOW)
+
+    assert draft.preferred_expires_at == NOW + timedelta(minutes=35)
+    assert effective_purchase_rate(draft, NOW + timedelta(minutes=34)) == Decimal("4.1")
+    assert activate_fallback(draft, NOW + timedelta(minutes=34)) is False
+    assert activate_fallback(draft, NOW + timedelta(minutes=35)) is True
+    assert draft.fallback_active is True
+    assert effective_purchase_rate(draft, NOW + timedelta(minutes=35)) == Decimal("4.5")
 
 
 def test_cancellation_is_terminal_and_preserves_the_order() -> None:

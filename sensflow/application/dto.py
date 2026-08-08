@@ -145,6 +145,11 @@ class OrderDetailDTO:
     created_at: datetime
     completed_at: datetime | None
     timeline: tuple[TimelineEventDTO, ...]
+    preferred_rate: Decimal | None = None
+    preferred_timeout_minutes: int | None = None
+    preferred_expires_at: datetime | None = None
+    fallback_active: bool = False
+    executed_rate: Decimal | None = None
     marketplace_rate: Decimal | None = None
     marketplace_status: MarketplaceOrderStatus | None = None
     marketplace_order_reference: str | None = None
@@ -239,6 +244,11 @@ class SettingsDTO:
     """Persisted operator-editable System Settings."""
 
     maximum_purchase_rate: Decimal
+    preferred_purchase_rate: Decimal
+    preferred_timeout_minutes: int
+    low_balance_threshold: Decimal
+    critical_balance_threshold: Decimal
+    stock_notifications_enabled: bool
     automatic_reorder_enabled: bool
     automatic_reorder_interval_seconds: Decimal
     auto_requeue_delay_seconds: Decimal

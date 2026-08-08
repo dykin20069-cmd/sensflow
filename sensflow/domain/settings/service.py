@@ -24,12 +24,26 @@ class SettingsDefaults:
     notification_categories: tuple[NotificationType, ...]
     application_timezone: str
     auto_requeue_delay_seconds: Decimal = Decimal("5")
+    preferred_purchase_rate: Decimal | None = None
+    preferred_timeout_minutes: int = 35
+    low_balance_threshold: Decimal = Decimal("10")
+    critical_balance_threshold: Decimal = Decimal("5")
+    stock_notifications_enabled: bool = True
 
 
 def create_settings(defaults: SettingsDefaults) -> SystemSettings:
     """Create the one persistent settings row from validated process defaults."""
     settings = SystemSettings(
         maximum_purchase_rate=defaults.maximum_purchase_rate,
+        preferred_purchase_rate=(
+            min(defaults.maximum_purchase_rate, Decimal("4.3"))
+            if defaults.preferred_purchase_rate is None
+            else defaults.preferred_purchase_rate
+        ),
+        preferred_timeout_minutes=defaults.preferred_timeout_minutes,
+        low_balance_threshold=defaults.low_balance_threshold,
+        critical_balance_threshold=defaults.critical_balance_threshold,
+        stock_notifications_enabled=defaults.stock_notifications_enabled,
         automatic_reorder_enabled=defaults.automatic_reorder_enabled,
         automatic_reorder_interval_seconds=defaults.automatic_reorder_interval_seconds,
         auto_requeue_delay_seconds=defaults.auto_requeue_delay_seconds,
@@ -56,6 +70,17 @@ def update_setting(settings: SystemSettings, field: SettingField, raw_value: str
 def validate_settings(settings: SystemSettings) -> None:
     """Enforce all field-level SystemSettings invariants before persistence."""
     _positive_decimal(settings.maximum_purchase_rate, "Maximum purchase rate")
+    _positive_decimal(settings.preferred_purchase_rate, "Preferred purchase rate")
+    if settings.preferred_purchase_rate > settings.maximum_purchase_rate:
+        raise DomainValidationError("Preferred purchase rate must not exceed maximum purchase rate")
+    if settings.preferred_timeout_minutes <= 0:
+        raise DomainValidationError("Preferred timeout must be greater than zero")
+    _nonnegative_decimal(settings.low_balance_threshold, "Low balance threshold")
+    _nonnegative_decimal(settings.critical_balance_threshold, "Critical balance threshold")
+    if settings.critical_balance_threshold > settings.low_balance_threshold:
+        raise DomainValidationError(
+            "Critical balance threshold must not exceed low balance threshold"
+        )
     _rate_decimal(settings.marketplace_commission, "Marketplace commission")
     _positive_decimal(settings.usd_exchange_rate, "USD exchange rate")
     if settings.automatic_reorder_interval_seconds < Decimal("0.3"):
@@ -77,6 +102,9 @@ def _parse_setting(field: SettingField, raw_value: str) -> object:
         SettingField.AUTOMATIC_REORDER_INTERVAL_SECONDS,
         SettingField.AUTO_REQUEUE_DELAY_SECONDS,
         SettingField.MAXIMUM_PURCHASE_RATE,
+        SettingField.PREFERRED_PURCHASE_RATE,
+        SettingField.LOW_BALANCE_THRESHOLD,
+        SettingField.CRITICAL_BALANCE_THRESHOLD,
         SettingField.MARKETPLACE_COMMISSION,
         SettingField.USD_EXCHANGE_RATE,
     }:
@@ -87,6 +115,7 @@ def _parse_setting(field: SettingField, raw_value: str) -> object:
     if field in {
         SettingField.MARKETPLACE_MONITORING_INTERVAL_SECONDS,
         SettingField.SYNCHRONIZATION_INTERVAL_SECONDS,
+        SettingField.PREFERRED_TIMEOUT_MINUTES,
     }:
         try:
             return int(value)
@@ -95,6 +124,7 @@ def _parse_setting(field: SettingField, raw_value: str) -> object:
     if field in {
         SettingField.AUTOMATIC_REORDER_ENABLED,
         SettingField.TELEGRAM_NOTIFICATIONS_ENABLED,
+        SettingField.STOCK_NOTIFICATIONS_ENABLED,
     }:
         normalized = value.casefold()
         if normalized in {"true", "yes", "1", "on"}:
@@ -129,6 +159,11 @@ def _positive_decimal(value: Decimal, name: str) -> None:
 def _rate_decimal(value: Decimal, name: str) -> None:
     if not value.is_finite() or not Decimal("0") <= value <= Decimal("1"):
         raise DomainValidationError(f"{name} must be a decimal rate between 0 and 1")
+
+
+def _nonnegative_decimal(value: Decimal, name: str) -> None:
+    if not value.is_finite() or value < 0:
+        raise DomainValidationError(f"{name} must be finite and nonnegative")
 
 
 def _timezone(value: str) -> None:

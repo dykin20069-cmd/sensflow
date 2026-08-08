@@ -36,8 +36,10 @@ from sensflow.domain.enums import (
 )
 from sensflow.domain.errors import DomainConflictError, DomainValidationError
 from sensflow.domain.finance.service import (
+    PurchaseResult,
     calculate_customer_receives,
     calculate_financial_snapshot,
+    create_purchase_result,
     record_observed_marketplace_cost,
 )
 from sensflow.domain.marketplace.service import (
@@ -48,8 +50,10 @@ from sensflow.domain.marketplace.service import (
     update_marketplace_progress,
 )
 from sensflow.domain.order.service import (
+    activate_fallback,
     cancel_order,
     complete_order,
+    effective_purchase_rate,
     enter_preorder,
     return_to_preorder,
     start_purchasing,
@@ -134,7 +138,7 @@ class MarketplaceWorkflows:
                 for item in stock
             ),
             maximum_purchase_rate=settings.maximum_purchase_rate,
-            preferred_rate=Decimal("4.3"),
+            preferred_rate=settings.preferred_purchase_rate,
             updated_at=self._clock(),
         )
 
@@ -147,7 +151,7 @@ class MarketplaceWorkflows:
             stock,
             requested_robux=requested_robux,
             minimum_purchase_rate=self._minimum_purchase_rate,
-            maximum_purchase_rate=settings.maximum_purchase_rate,
+            maximum_purchase_rate=settings.preferred_purchase_rate,
         )
         return StockAvailabilityDTO(
             available=selected is not None,
@@ -171,17 +175,16 @@ class MarketplaceWorkflows:
 
     async def plan_automation(
         self,
-        candidates: tuple[tuple[UUID, int], ...],
+        candidates: tuple[tuple[UUID, int, Decimal], ...],
     ) -> AutomationStockPlan:
         """Fetch stock once for notification, PreOrder, and active-requeue decisions."""
         async with self._sessions.begin() as session:
             settings = await self._get_settings(session)
             stock = await self._bridge.get_detailed_stock()
-        order_ids, _ = _select_preorders_maximum_clients(
+        order_ids, _ = _select_preorders_by_order_limit(
             candidates,
             stock,
             minimum_purchase_rate=self._minimum_purchase_rate,
-            maximum_purchase_rate=settings.maximum_purchase_rate,
         )
         return AutomationStockPlan(
             order_ids=order_ids,
@@ -189,6 +192,30 @@ class MarketplaceWorkflows:
             minimum_purchase_rate=self._minimum_purchase_rate,
             maximum_purchase_rate=settings.maximum_purchase_rate,
         )
+
+    async def activate_expired_fallbacks(self) -> int:
+        """Enable hard-limit purchasing for every expired preferred-rate PreOrder."""
+        now = self._clock()
+        activated = 0
+        async with self._sessions.begin() as session:
+            repository = ClientOrderRepository(session)
+            for order in await repository.list_expired_preferred_for_update(now):
+                if activate_fallback(order, now):
+                    await repository.save(order)
+                    activated += 1
+                    logger.info(
+                        "preferred_fallback_activated",
+                        extra={
+                            "order_id": str(order.id),
+                            "preferred_rate": str(order.preferred_rate),
+                            "maximum_rate": str(order.marketplace_rate_limit),
+                        },
+                    )
+        return activated
+
+    async def get_balance(self) -> Decimal:
+        """Expose the RBXCrate balance to the owned automation coordinator."""
+        return await self._bridge.get_balance()
 
     async def start_purchase(self, order_id: UUID) -> ActionResultDTO:
         """Select suitable stock and either start an attempt or retain a PreOrder."""
@@ -210,6 +237,16 @@ class MarketplaceWorkflows:
                 if customer is None:
                     raise NotFoundError("Customer")
                 was_draft = order.current_status is ClientOrderStatus.DRAFT
+                if (
+                    was_draft
+                    and order.preferred_expires_at is None
+                    and order.preferred_timeout_minutes is not None
+                ):
+                    order.preferred_expires_at = now + timedelta(
+                        minutes=order.preferred_timeout_minutes
+                    )
+                if order.current_status is ClientOrderStatus.PREORDER:
+                    activate_fallback(order, now)
                 if was_draft:
                     await timeline.save(
                         create_timeline_event(
@@ -220,24 +257,23 @@ class MarketplaceWorkflows:
                         )
                     )
 
-                settings = await self._get_settings(session)
                 stock = await self._bridge.get_detailed_stock()
                 selected = _select_stock(
                     stock,
                     requested_robux=order.requested_robux,
                     minimum_purchase_rate=self._minimum_purchase_rate,
-                    maximum_purchase_rate=settings.maximum_purchase_rate,
+                    maximum_purchase_rate=effective_purchase_rate(order, now),
                 )
                 if selected is None:
                     if was_draft:
-                        enter_preorder(order)
+                        enter_preorder(order, now)
                     await orders.save(order)
                     if was_draft:
                         await timeline.save(
                             create_timeline_event(
                                 order,
                                 TimelineEventType.PREORDER_CREATED,
-                                "No stock satisfies the quantity, instant-order, and rate limits.",
+                                "No stock satisfies the preferred rate and quantity limits.",
                                 now + timedelta(microseconds=1),
                             )
                         )
@@ -262,7 +298,6 @@ class MarketplaceWorkflows:
                     raise DomainConflictError(
                         "The Client Order already has an active Marketplace Order"
                     )
-                order.marketplace_rate_limit = settings.maximum_purchase_rate
                 start_purchasing(order)
                 external = await self._bridge.create_gamepass_order(
                     roblox_username=customer.current_username,
@@ -473,7 +508,7 @@ class MarketplaceWorkflows:
                     current_stock,
                     requested_robux=order.requested_robux,
                     minimum_purchase_rate=self._minimum_purchase_rate,
-                    maximum_purchase_rate=settings.maximum_purchase_rate,
+                    maximum_purchase_rate=order.marketplace_rate_limit,
                 )
                 if selected is None:
                     message = (
@@ -544,7 +579,6 @@ class MarketplaceWorkflows:
                     active,
                     confirmed_status,
                 )
-                order.marketplace_rate_limit = settings.maximum_purchase_rate
                 start_purchasing(order)
                 external = await self._bridge.create_gamepass_order(
                     roblox_username=customer.current_username,
@@ -778,6 +812,11 @@ class MarketplaceWorkflows:
                 money_quantum=self._finance_policy.money_quantum,
                 rounding=self._finance_policy.money_rounding,
             )
+            purchase_result = create_purchase_result(
+                requested_rate=marketplace_order.purchase_rate,
+                purchased_robux=marketplace_order.requested_robux,
+                financials=financials,
+            )
             marketplace_completed_now = (
                 marketplace_order.marketplace_status is MarketplaceOrderStatus.ACTIVE
             )
@@ -798,6 +837,7 @@ class MarketplaceWorkflows:
                 final_cost_local_currency=financials.final_cost_local_currency,
                 usd_exchange_rate=financials.usd_exchange_rate,
                 now=now,
+                executed_rate=purchase_result.executed_rate,
             )
             await marketplace_orders.save(marketplace_order)
             await orders.save(order)
@@ -832,6 +872,7 @@ class MarketplaceWorkflows:
                                 marketplace_order,
                                 customer.current_username,
                                 settings.marketplace_commission,
+                                purchase_result,
                             ),
                             delivery_status=NotificationDeliveryStatus.PENDING,
                         )
@@ -947,26 +988,66 @@ def _select_preorders_maximum_clients(
     return tuple(selected_ids), notification_stock
 
 
+def _select_preorders_by_order_limit(
+    candidates: tuple[tuple[UUID, int, Decimal], ...],
+    stock: tuple[MarketplaceStock, ...],
+    *,
+    minimum_purchase_rate: Decimal,
+) -> tuple[tuple[UUID, ...], MarketplaceStock | None]:
+    """Fit smallest orders while respecting each order's current preferred/fallback limit."""
+    remaining = [item.total_robux_amount for item in stock]
+    selected_ids: list[UUID] = []
+    notification_stock: MarketplaceStock | None = None
+    for order_id, requested_robux, order_limit in sorted(
+        candidates,
+        key=lambda item: (item[1], item[0]),
+    ):
+        eligible_indexes = [
+            index
+            for index, item in enumerate(stock)
+            if minimum_purchase_rate <= item.rate <= order_limit
+            and item.max_instant_order >= requested_robux
+            and remaining[index] >= requested_robux
+        ]
+        if not eligible_indexes:
+            continue
+        selected_index = min(
+            eligible_indexes,
+            key=lambda index: (stock[index].rate, -remaining[index]),
+        )
+        remaining[selected_index] -= requested_robux
+        selected_ids.append(order_id)
+        if notification_stock is None:
+            notification_stock = stock[selected_index]
+    return tuple(selected_ids), notification_stock
+
+
 def _format_purchase_completed_notification(
     order: ClientOrder,
     marketplace_order: MarketplaceOrder,
     username: str,
     commission_rate: Decimal,
+    purchase_result: PurchaseResult,
 ) -> str:
     """Format the completed order's immutable historical financial snapshot."""
     commission_percent = commission_rate * Decimal("100")
+    executed_rate = purchase_result.executed_rate
+    preferred_rate = order.preferred_rate or marketplace_order.purchase_rate
+    warning = "\n⚠️ Executed above preferred rate" if executed_rate > preferred_rate else ""
     return (
         "<b>✅ Purchase completed</b>\n\n"
         f"👤 Username: {escape(username)}\n"
         f"🛒 Purchased: {marketplace_order.purchased_robux} R$\n"
         f"🎁 Client receives: {order.customer_receives} R$\n"
-        f"💵 Rate: {marketplace_order.purchase_rate.normalize()}$\n"
+        f"🎯 Preferred trigger: {preferred_rate.normalize()}$\n"
+        f"💰 Executed rate: {executed_rate.normalize()}$\n"
         f"💰 Marketplace price: ${(order.marketplace_cost or Decimal('0')):.2f}\n"
         f"🧾 +{commission_percent.normalize()}% commission: "
         f"${(order.marketplace_commission or Decimal('0')):.2f}\n"
         f"💳 Total paid: ${(order.final_cost_usd or Decimal('0')):.2f}\n"
         f"🇷🇺 Total RUB: {(order.final_cost_local_currency or Decimal('0')):.2f} ₽\n\n"
         f"Order: #{order.id.hex[:8].upper()}"
+        f"{warning}"
     )
 
 

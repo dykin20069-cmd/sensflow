@@ -187,6 +187,11 @@ def test_settings_and_statistics_services_only_read_persisted_projections() -> N
         settings_row = SystemSettings(
             id=uuid4(),
             maximum_purchase_rate=Decimal("1.25"),
+            preferred_purchase_rate=Decimal("1.00"),
+            preferred_timeout_minutes=35,
+            low_balance_threshold=Decimal("10"),
+            critical_balance_threshold=Decimal("5"),
+            stock_notifications_enabled=True,
             automatic_reorder_enabled=True,
             automatic_reorder_interval_seconds=300,
             auto_requeue_delay_seconds=Decimal("5"),

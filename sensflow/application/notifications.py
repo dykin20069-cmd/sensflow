@@ -115,9 +115,7 @@ class NotificationService:
                         logger.info(
                             "stock_notification_sent",
                             extra={
-                                "rate": notification.title.removeprefix(
-                                    "Suitable stock detected · "
-                                ),
+                                "rate": notification.title.removeprefix("Stock appeared · "),
                                 "recipient": str(self._recipient),
                             },
                         )

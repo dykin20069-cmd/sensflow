@@ -9,6 +9,7 @@ from sensflow.domain.errors import DomainValidationError
 from sensflow.domain.finance.service import (
     calculate_customer_receives,
     calculate_financial_snapshot,
+    create_purchase_result,
 )
 from sensflow.domain.settings.service import SettingsDefaults, create_settings, update_setting
 
@@ -75,10 +76,37 @@ def test_production_finance_rounds_cost_fee_total_and_rubles_to_cents() -> None:
     assert snapshot.final_cost_local_currency == Decimal("234.90")
 
 
+def test_purchase_result_derives_executed_rate_from_total_paid() -> None:
+    financials = calculate_financial_snapshot(
+        marketplace_cost=Decimal("2.09"),
+        commission_rate=Decimal("0.05"),
+        usd_exchange_rate=Decimal("88"),
+        money_quantum=Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+
+    result = create_purchase_result(
+        requested_rate=Decimal("3.7"),
+        purchased_robux=486,
+        financials=financials,
+    )
+
+    assert result.requested_rate == Decimal("3.7")
+    assert result.marketplace_price_usd == Decimal("2.09")
+    assert result.commission_usd == Decimal("0.10")
+    assert result.total_paid_usd == Decimal("2.19")
+    assert result.executed_rate == Decimal("4.50617284")
+
+
 def test_settings_service_parses_every_value_shape_and_rejects_invalid_values() -> None:
     settings = create_settings(defaults())
 
     update_setting(settings, SettingField.MAXIMUM_PURCHASE_RATE, "1.50")
+    update_setting(settings, SettingField.PREFERRED_PURCHASE_RATE, "1.10")
+    update_setting(settings, SettingField.PREFERRED_TIMEOUT_MINUTES, "35")
+    update_setting(settings, SettingField.LOW_BALANCE_THRESHOLD, "12")
+    update_setting(settings, SettingField.CRITICAL_BALANCE_THRESHOLD, "6")
+    update_setting(settings, SettingField.STOCK_NOTIFICATIONS_ENABLED, "off")
     update_setting(settings, SettingField.AUTOMATIC_REORDER_ENABLED, "off")
     update_setting(settings, SettingField.AUTOMATIC_REORDER_INTERVAL_SECONDS, "0.3")
     update_setting(settings, SettingField.AUTO_REQUEUE_DELAY_SECONDS, "5")
@@ -91,6 +119,11 @@ def test_settings_service_parses_every_value_shape_and_rejects_invalid_values() 
     update_setting(settings, SettingField.APPLICATION_TIMEZONE, "Europe/Moscow")
 
     assert settings.maximum_purchase_rate == Decimal("1.50")
+    assert settings.preferred_purchase_rate == Decimal("1.10")
+    assert settings.preferred_timeout_minutes == 35
+    assert settings.low_balance_threshold == Decimal("12")
+    assert settings.critical_balance_threshold == Decimal("6")
+    assert settings.stock_notifications_enabled is False
     assert settings.automatic_reorder_enabled is False
     assert settings.automatic_reorder_interval_seconds == Decimal("0.3")
     assert settings.auto_requeue_delay_seconds == Decimal("5")

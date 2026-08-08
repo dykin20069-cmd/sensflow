@@ -46,6 +46,11 @@ def create_application(settings: Settings) -> Application:
     rbxcrate_bridge = RbxcreateBridge(rbxcrate_gateway)
     settings_defaults = SettingsDefaults(
         maximum_purchase_rate=settings.marketplace.maximum_purchase_rate,
+        preferred_purchase_rate=settings.marketplace.preferred_purchase_rate,
+        preferred_timeout_minutes=settings.marketplace.preferred_timeout_minutes,
+        low_balance_threshold=settings.marketplace.low_balance_threshold,
+        critical_balance_threshold=settings.marketplace.critical_balance_threshold,
+        stock_notifications_enabled=settings.marketplace.stock_notifications_enabled,
         automatic_reorder_enabled=settings.automation.automatic_reorder_enabled,
         automatic_reorder_interval_seconds=(settings.automation.automatic_reorder_interval_seconds),
         auto_requeue_delay_seconds=settings.automation.auto_requeue_delay_seconds,
