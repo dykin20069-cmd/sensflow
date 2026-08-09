@@ -19,8 +19,10 @@ from sensflow.application.errors import (
     MarketplaceRateLimitedError,
 )
 from sensflow.application.marketplace_workflows import (
+    MARKETPLACE_DAILY_LIMIT_WARNING,
     MarketplaceWorkflows,
     _format_purchase_completed_notification,
+    marketplace_requeue_delay_seconds,
 )
 from sensflow.application.rbxcreate_bridge import (
     MarketplaceCreateResult,
@@ -163,6 +165,7 @@ def _wire(
     order: ClientOrder,
     attempt: MarketplaceOrder | None = None,
     maximum_purchase_rate: Decimal = Decimal("2.50"),
+    marketplace_attempts_today: int = 1,
 ) -> SimpleNamespace:
     saved_marketplace: list[MarketplaceOrder] = []
     timeline: list[object] = []
@@ -180,6 +183,9 @@ def _wire(
     class Customers:
         async def get(self, customer_id: object) -> Customer | None:
             return customer if customer_id == customer.id else None
+
+        async def get_for_update(self, customer_id: object) -> Customer | None:
+            return await self.get(customer_id)
 
     class Marketplace:
         async def get(self, marketplace_id: object) -> MarketplaceOrder | None:
@@ -207,6 +213,15 @@ def _wire(
         async def save(self, entity: MarketplaceOrder) -> MarketplaceOrder:
             saved_marketplace.append(entity)
             return entity
+
+        async def count_created_for_username_since(
+            self,
+            username: str,
+            since: datetime,
+        ) -> int:
+            assert username == customer.current_username
+            assert since == NOW - timedelta(hours=24)
+            return marketplace_attempts_today
 
     class Timeline:
         async def save(self, event: object) -> object:
@@ -438,6 +453,36 @@ def test_supplier_preorder_is_started_and_returns_operator_warning(monkeypatch: 
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(
+    ("attempt_number", "expected_delay"),
+    [
+        (1, 5),
+        (2, 5),
+        (3, 5),
+        (4, 15),
+        (5, 15),
+        (6, 20),
+        (10, 20),
+        (11, 30),
+        (20, 30),
+        (21, 120),
+        (22, 300),
+        (23, 600),
+        (24, None),
+    ],
+)
+def test_marketplace_requeue_delay_policy(
+    attempt_number: int,
+    expected_delay: int | None,
+) -> None:
+    assert marketplace_requeue_delay_seconds(attempt_number) == expected_delay
+
+
+def test_marketplace_requeue_delay_rejects_nonpositive_attempts() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        marketplace_requeue_delay_seconds(0)
+
+
 def test_manual_requeue_cancels_and_replaces_active_attempt_atomically(
     monkeypatch: Any,
 ) -> None:
@@ -532,6 +577,130 @@ def test_automatic_requeue_checks_status_then_replaces_once(monkeypatch: Any) ->
         assert UUID(str(bridge.create_calls[0]["order_id"]))
         assert attempt.marketplace_status is MarketplaceOrderStatus.CANCELLED
         assert state.saved_marketplace[-1].marketplace_status is MarketplaceOrderStatus.ACTIVE
+
+    asyncio.run(scenario())
+
+
+def test_automatic_requeue_enters_safe_mode_on_attempt_21(
+    monkeypatch: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        attempt = _attempt(order)
+        attempt.created_at = NOW - timedelta(seconds=120)
+        state = _wire(
+            monkeypatch,
+            customer=customer,
+            order=order,
+            attempt=attempt,
+            marketplace_attempts_today=20,
+        )
+        bridge = Bridge(sync_results=_active_then_cancelled(attempt))
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        with caplog.at_level(logging.INFO):
+            result = await workflows.automatic_requeue(
+                order.id,
+                (MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),),
+            )
+
+        assert result.message == "Marketplace Order automatically requeued."
+        assert len(bridge.create_calls) == 1
+        assert state.saved_marketplace[-1].marketplace_status is MarketplaceOrderStatus.ACTIVE
+        scheduled = next(
+            record for record in caplog.records if record.message == "marketplace_requeue_scheduled"
+        )
+        assert scheduled.username == "builder"
+        assert scheduled.attempt_number == 21
+        assert scheduled.delay_seconds == 120
+        assert scheduled.estimated_remaining_safe_attempts == 3
+        assert "marketplace_requeue_safe_mode_enabled" in caplog.messages
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("attempts_today", "elapsed_seconds"),
+    [
+        (20, 119),
+        (21, 299),
+        (22, 599),
+    ],
+)
+def test_safe_mode_attempts_never_requeue_before_their_protective_delay(
+    monkeypatch: Any,
+    attempts_today: int,
+    elapsed_seconds: int,
+) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        attempt = _attempt(order)
+        attempt.created_at = NOW - timedelta(seconds=elapsed_seconds)
+        _wire(
+            monkeypatch,
+            customer=customer,
+            order=order,
+            attempt=attempt,
+            marketplace_attempts_today=attempts_today,
+        )
+        bridge = Bridge()
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        result = await workflows.automatic_requeue(
+            order.id,
+            (MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),),
+        )
+
+        assert result.message == "Automatic requeue delay has not elapsed."
+        assert bridge.sync_calls == 0
+        assert bridge.cancel_calls == []
+        assert bridge.create_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_automatic_requeue_stops_before_attempt_24(
+    monkeypatch: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        attempt = _attempt(order)
+        attempt.created_at = NOW - timedelta(minutes=20)
+        _wire(
+            monkeypatch,
+            customer=customer,
+            order=order,
+            attempt=attempt,
+            marketplace_attempts_today=23,
+        )
+        bridge = Bridge()
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        with caplog.at_level(logging.WARNING):
+            result = await workflows.automatic_requeue(
+                order.id,
+                (MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),),
+            )
+
+        assert result.message == MARKETPLACE_DAILY_LIMIT_WARNING
+        assert order.automatic_requeue_enabled is False
+        assert bridge.sync_calls == 0
+        assert bridge.cancel_calls == []
+        assert bridge.create_calls == []
+        stopped = next(
+            record
+            for record in caplog.records
+            if record.message == "marketplace_requeue_stopped_due_to_daily_limit"
+        )
+        assert stopped.username == "builder"
+        assert stopped.attempt_number == 24
+        assert stopped.delay_seconds == 0
+        assert stopped.estimated_remaining_safe_attempts == 0
 
     asyncio.run(scenario())
 

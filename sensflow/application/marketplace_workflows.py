@@ -85,6 +85,15 @@ logger = logging.getLogger(__name__)
 FRESH_PURCHASE_GUARD_SECONDS = 5
 STATUS_CHECK_COOLDOWN_SECONDS = 3
 STATUS_CHECK_BACKOFF_SECONDS = (5, 10, 20)
+MARKETPLACE_ATTEMPT_WINDOW = timedelta(hours=24)
+MARKETPLACE_DAILY_ATTEMPT_LIMIT = 24
+MARKETPLACE_SAFE_MODE_START = 21
+MARKETPLACE_DAILY_LIMIT_WARNING = (
+    "⚠️ Marketplace daily limit almost exhausted\n\n"
+    "This Roblox account has reached the safe RBXCrate requeue threshold. Further "
+    "automatic requeue attempts were stopped to avoid hitting the 24-orders-per-day "
+    "limit.\n\nUse Requeue Now manually only if necessary."
+)
 SUPPLIER_PREORDER_MESSAGE = (
     "⚠️ Товар временно оформлен как предзаказ. Выдача произойдёт автоматически после "
     "появления свободного аккаунта поставщика."
@@ -115,6 +124,27 @@ class AutomationStockPlan:
 class _StatusCheckOutcome:
     snapshot: MarketplaceSyncResult
     skipped: bool = False
+
+
+def marketplace_requeue_delay_seconds(attempt_number: int) -> int | None:
+    """Return the delay before an automatic marketplace creation attempt."""
+    if attempt_number < 1:
+        raise ValueError("attempt_number must be positive")
+    if attempt_number <= 3:
+        return 5
+    if attempt_number <= 5:
+        return 15
+    if attempt_number <= 10:
+        return 20
+    if attempt_number <= 20:
+        return 30
+    if attempt_number == 21:
+        return 120
+    if attempt_number == 22:
+        return 300
+    if attempt_number == 23:
+        return 600
+    return None
 
 
 class MarketplaceWorkflows:
@@ -266,7 +296,7 @@ class MarketplaceWorkflows:
 
                 now = self._clock()
                 timeline = TimelineEventRepository(session)
-                customer = await CustomerRepository(session).get(order.customer_id)
+                customer = await CustomerRepository(session).get_for_update(order.customer_id)
                 if customer is None:
                     raise NotFoundError("Customer")
                 was_draft = order.current_status is ClientOrderStatus.DRAFT
@@ -584,7 +614,6 @@ class MarketplaceWorkflows:
                         "An order with purchased Robux must be synchronized before requeueing"
                     )
 
-                settings = await self._get_settings(session)
                 now = self._clock()
                 if _purchase_age(active, now) < timedelta(seconds=FRESH_PURCHASE_GUARD_SECONDS):
                     logger.info(
@@ -592,18 +621,41 @@ class MarketplaceWorkflows:
                         extra=_recent_purchase_log_context(order.id, active, now),
                     )
                     return ActionResultDTO(message="Fresh purchase retained without requeue.")
-                delay = settings.auto_requeue_delay_seconds or Decimal("5")
-                requeue_anchor = order.last_requeue_at or active.created_at
-                if (
-                    automatic
-                    and requeue_anchor is not None
-                    and now - requeue_anchor < timedelta(seconds=float(delay))
-                ):
-                    return ActionResultDTO(message="Automatic requeue delay has not elapsed.")
 
-                customer = await CustomerRepository(session).get(order.customer_id)
+                customer = await CustomerRepository(session).get_for_update(order.customer_id)
                 if customer is None:
                     raise NotFoundError("Customer")
+                attempt_number = (order.requeue_attempts or 0) + 2
+                delay_seconds = 0
+                if automatic:
+                    attempts_today = await marketplace_orders.count_created_for_username_since(
+                        customer.current_username,
+                        now - MARKETPLACE_ATTEMPT_WINDOW,
+                    )
+                    attempt_number = attempts_today + 1
+                    calculated_delay = marketplace_requeue_delay_seconds(attempt_number)
+                    if calculated_delay is None:
+                        order.automatic_requeue_enabled = False
+                        await orders.save(order)
+                        logger.warning(
+                            "marketplace_requeue_stopped_due_to_daily_limit",
+                            extra={
+                                "order_id": str(order.id),
+                                "username": customer.current_username,
+                                "attempt_number": attempt_number,
+                                "delay_seconds": 0,
+                                "estimated_remaining_safe_attempts": 0,
+                            },
+                        )
+                        return ActionResultDTO(message=MARKETPLACE_DAILY_LIMIT_WARNING)
+                    delay_seconds = calculated_delay
+                    requeue_anchor = order.last_requeue_at or active.created_at
+                    if requeue_anchor is not None and now - requeue_anchor < timedelta(
+                        seconds=delay_seconds
+                    ):
+                        return ActionResultDTO(message="Automatic requeue delay has not elapsed.")
+
+                settings = await self._get_settings(session)
                 expected_active_id = active.id
                 expected_external_id = active.rbxcreate_order_id
                 status_check = await self._get_order_info_if_due(session, active)
@@ -634,8 +686,23 @@ class MarketplaceWorkflows:
                     )
                     return ActionResultDTO(message=message)
 
-                attempt_number = (order.requeue_attempts or 0) + 2
                 if automatic:
+                    log_context = {
+                        "order_id": str(order.id),
+                        "username": customer.current_username,
+                        "attempt_number": attempt_number,
+                        "delay_seconds": delay_seconds,
+                        "estimated_remaining_safe_attempts": max(
+                            0,
+                            MARKETPLACE_DAILY_ATTEMPT_LIMIT - attempt_number,
+                        ),
+                    }
+                    logger.info("marketplace_requeue_scheduled", extra=log_context)
+                    if attempt_number >= MARKETPLACE_SAFE_MODE_START:
+                        logger.warning(
+                            "marketplace_requeue_safe_mode_enabled",
+                            extra=log_context,
+                        )
                     logger.info(
                         "auto_requeue_started",
                         extra={
@@ -657,7 +724,7 @@ class MarketplaceWorkflows:
                                     customer.current_username,
                                     order,
                                     active.rbxcreate_order_id,
-                                    delay,
+                                    Decimal(delay_seconds),
                                     attempt_number,
                                 ),
                                 delivery_status=NotificationDeliveryStatus.PENDING,

@@ -310,6 +310,16 @@ def render_order_details(order: OrderDetailDTO) -> Screen:
 
 
 def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Screen:
+    marketplace_attempts = f"Marketplace attempts today: {order.marketplace_attempts_today} / 24"
+    if order.marketplace_attempts_today >= 20:
+        marketplace_attempts += "\n🟠 Safe mode enabled"
+    if order.marketplace_attempts_today >= 23 and not order.automatic_requeue_enabled:
+        marketplace_attempts += (
+            "\n\n⚠️ Marketplace daily limit almost exhausted\n\n"
+            "This Roblox account has reached the safe RBXCrate requeue threshold. Further "
+            "automatic requeue attempts were stopped to avoid hitting the 24-orders-per-day "
+            "limit.\n\nUse Requeue Now manually only if necessary."
+        )
     preferred_disabled = (
         "⚡ Preferred: disabled\n🚀 Immediate execution allowed"
         if not order.preferred_mode_enabled
@@ -325,6 +335,7 @@ def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Scree
             f"Marketplace rate limit: ≤ {format_decimal(order.marketplace_rate_limit, '$')}\n"
             f"Auto Requeue: {format_boolean(order.automatic_requeue_enabled)}\n"
             f"Requeue attempts: {order.requeue_attempts}\n"
+            f"{marketplace_attempts}\n"
             f"⏱ Created: {_format_card_datetime(order.created_at)}"
             f"{'' if preferred_disabled is None else f'\n{preferred_disabled}'}"
         )
@@ -353,6 +364,7 @@ def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Scree
             f"👤 {escape_text(order.customer_username)}\n"
             f"🛒 {format_robux(order.requested_robux)}\n"
             f"🎁 Client: {format_robux(order.customer_receives)}\n"
+            f"{marketplace_attempts}\n"
             f"Waiting: {_format_duration(order.waiting_seconds)}\n"
             "Next automatic retry: "
             f"in {format_decimal(order.next_automatic_retry_seconds, 's')}\n"
@@ -367,6 +379,7 @@ def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Scree
             f"💰 {format_robux(order.requested_robux)}\n"
             f"🎮 <code>{order.current_place_id}</code>\n"
             f"Status: {humanize(order.status)}\n"
+            f"{marketplace_attempts}\n"
             f"Max rate: {format_decimal(order.marketplace_rate_limit, '$')}\n"
             f"{preferred_disabled or f'Preferred: {format_decimal(order.preferred_rate, "$")}'}"
         )

@@ -235,6 +235,15 @@ def test_marketplace_order_repository_exposes_active_external_and_history_querie
         assert await repository.count_by_status(MarketplaceOrderStatus.ACTIVE) == 3
         assert "count(*)" in sql(session.scalar.await_args.args[0]).lower()
 
+        since = datetime(2026, 8, 8, tzinfo=UTC) - timedelta(hours=24)
+        assert await repository.count_created_for_username_since("Builder", since) == 3
+        attempts_sql = sql(session.scalar.await_args.args[0])
+        assert "JOIN client_orders" in attempts_sql
+        assert "JOIN customers" in attempts_sql
+        assert "lower(customers.current_username) = 'builder'" in attempts_sql
+        assert "marketplace_orders.created_at >=" in attempts_sql
+        assert "marketplace_orders.marketplace_status" not in attempts_sql
+
         await repository.list_completed_for_unfinished_client_orders()
         unfinished_sql = sql(session.scalars.await_args.args[0])
         assert "JOIN client_orders" in unfinished_sql

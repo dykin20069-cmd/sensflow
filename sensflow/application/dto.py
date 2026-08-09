@@ -160,6 +160,7 @@ class OrderDetailDTO:
     remembered_place: bool = False
     automatic_requeue_enabled: bool = True
     requeue_attempts: int = 0
+    marketplace_attempts_today: int = 0
     last_requeue_at: datetime | None = None
     available_actions: tuple[OrderAction, ...] = ()
 

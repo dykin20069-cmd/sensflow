@@ -203,6 +203,7 @@ def _order_detail(
     *,
     remembered_place: bool = False,
     reorder_interval: Decimal | None = None,
+    marketplace_attempts_today: int = 0,
     now: datetime | None = None,
 ) -> OrderDetailDTO:
     preorder_started_at = next(
@@ -276,6 +277,7 @@ def _order_detail(
         remembered_place=remembered_place,
         automatic_requeue_enabled=(order.automatic_requeue_enabled is not False),
         requeue_attempts=order.requeue_attempts or 0,
+        marketplace_attempts_today=marketplace_attempts_today,
         last_requeue_at=order.last_requeue_at,
         available_actions=_order_actions(
             order.current_status,
@@ -453,10 +455,17 @@ class OrderApplicationService:
             order = await ClientOrderRepository(session).get_details(query.order_id)
             if order is None:
                 raise NotFoundError("Client Order")
+            now = self._clock()
             remembered = await UserPlaceCacheRepository(session).get_by_username(
                 order.customer.current_username
             )
             settings = await SystemSettingsRepository(session).get_current()
+            marketplace_attempts_today = await MarketplaceOrderRepository(
+                session
+            ).count_created_for_username_since(
+                order.customer.current_username,
+                now - timedelta(hours=24),
+            )
             return _order_detail(
                 order,
                 remembered_place=(
@@ -465,7 +474,8 @@ class OrderApplicationService:
                 reorder_interval=(
                     None if settings is None else settings.automatic_reorder_interval_seconds
                 ),
-                now=self._clock(),
+                marketplace_attempts_today=marketplace_attempts_today,
+                now=now,
             )
 
     async def find_similar_order(

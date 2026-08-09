@@ -1,11 +1,12 @@
 """Marketplace Order repository."""
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
 
 from sensflow.domain.enums import ClientOrderStatus, MarketplaceOrderStatus
-from sensflow.infrastructure.database.models import ClientOrder, MarketplaceOrder
+from sensflow.infrastructure.database.models import ClientOrder, Customer, MarketplaceOrder
 from sensflow.repositories.base import Repository
 
 
@@ -86,6 +87,24 @@ class MarketplaceOrderRepository(Repository[MarketplaceOrder]):
             select(func.count())
             .select_from(MarketplaceOrder)
             .where(MarketplaceOrder.marketplace_status == status)
+        )
+        return int(await self.session.scalar(statement) or 0)
+
+    async def count_created_for_username_since(
+        self,
+        username: str,
+        since: datetime,
+    ) -> int:
+        """Count every marketplace creation for one username in a time window."""
+        statement = (
+            select(func.count())
+            .select_from(MarketplaceOrder)
+            .join(MarketplaceOrder.client_order)
+            .join(ClientOrder.customer)
+            .where(
+                func.lower(Customer.current_username) == username.casefold(),
+                MarketplaceOrder.created_at >= since,
+            )
         )
         return int(await self.session.scalar(statement) or 0)
 

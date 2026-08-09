@@ -32,6 +32,9 @@ _STRUCTURED_FIELDS = (
     "customer",
     "available",
     "requeue_attempt",
+    "attempt_number",
+    "delay_seconds",
+    "estimated_remaining_safe_attempts",
     "reason",
 )
 

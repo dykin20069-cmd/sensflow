@@ -43,6 +43,7 @@ from sensflow.presentation.telegram.pagination import Pagination
 from sensflow.presentation.telegram.rendering import (
     render_customer_details,
     render_main_menu,
+    render_order_card,
     render_order_details,
 )
 from sensflow.presentation.telegram.states import (
@@ -153,6 +154,35 @@ def test_renderers_escape_content_and_use_service_supplied_actions() -> None:
     assert "Update Place ID" in str(customer_screen.reply_markup)
     assert "Roblox User ID: Not verified" in manual_customer_screen.text
     assert format_decimal(Decimal("0.0000")) == "0"
+
+
+def test_order_card_shows_daily_marketplace_attempts_and_limit_warning() -> None:
+    now = datetime.now(UTC)
+    order = OrderDetailDTO(
+        id=uuid4(),
+        customer_username="builder",
+        status=ClientOrderStatus.PURCHASING,
+        requested_robux=286,
+        customer_receives=200,
+        current_place_id=2,
+        marketplace_rate_limit=Decimal("4.5"),
+        marketplace_cost=None,
+        marketplace_commission=None,
+        final_cost_usd=None,
+        final_cost_local_currency=None,
+        created_at=now,
+        completed_at=None,
+        timeline=(),
+        automatic_requeue_enabled=False,
+        marketplace_attempts_today=23,
+    )
+
+    screen = render_order_card(order)
+
+    assert "Marketplace attempts today: 23 / 24" in screen.text
+    assert "🟠 Safe mode enabled" in screen.text
+    assert "⚠️ Marketplace daily limit almost exhausted" in screen.text
+    assert "Use Requeue Now manually only if necessary." in screen.text
 
 
 def test_error_presentation_is_safe_and_specific() -> None:
