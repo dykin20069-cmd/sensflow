@@ -49,6 +49,7 @@ from sensflow.domain.marketplace.service import (
     cancel_marketplace_order,
     complete_marketplace_order,
     create_marketplace_order,
+    force_close_marketplace_order,
     update_marketplace_progress,
 )
 from sensflow.domain.order.service import (
@@ -57,6 +58,7 @@ from sensflow.domain.order.service import (
     complete_order,
     effective_purchase_rate,
     enter_preorder,
+    force_close_order,
     return_to_preorder,
     start_purchasing,
 )
@@ -288,6 +290,11 @@ class MarketplaceWorkflows:
                 order = await orders.get_for_update(order_id)
                 if order is None:
                     raise NotFoundError("Client Order")
+                if order.current_status is ClientOrderStatus.FORCE_CLOSED:
+                    return ActionResultDTO(
+                        message="Force-closed order retained without purchasing.",
+                        order_id=order.id,
+                    )
                 if order.current_status not in {
                     ClientOrderStatus.DRAFT,
                     ClientOrderStatus.PREORDER,
@@ -438,6 +445,11 @@ class MarketplaceWorkflows:
                 marketplace_order = await marketplace_orders.get_for_update(marketplace_order_id)
                 if marketplace_order is None:
                     raise NotFoundError("Marketplace Order")
+                if (
+                    order.current_status is ClientOrderStatus.FORCE_CLOSED
+                    or marketplace_order.marketplace_status is MarketplaceOrderStatus.FORCE_CLOSED
+                ):
+                    return ActionResultDTO(message="Force-closed order retained without syncing.")
                 if order.current_status is ClientOrderStatus.COMPLETED:
                     if marketplace_order.marketplace_status is not MarketplaceOrderStatus.COMPLETED:
                         raise DomainConflictError(
@@ -532,22 +544,35 @@ class MarketplaceWorkflows:
     ) -> ActionResultDTO:
         """Start an eligible PreOrder; never replace an active purchase."""
         del cooldown_seconds
+        active_marketplace_id: UUID | None = None
         async with self._sessions() as session:
             order = await ClientOrderRepository(session).get(order_id)
             if order is None:
                 raise NotFoundError("Client Order")
+            if order.current_status in {
+                ClientOrderStatus.COMPLETED,
+                ClientOrderStatus.CANCELLED,
+                ClientOrderStatus.FORCE_CLOSED,
+            }:
+                return ActionResultDTO(message="Terminal order ignored by fast stock trigger.")
             if order.current_status is ClientOrderStatus.PREORDER:
-                now = self._clock()
-                selected = _select_stock(
-                    stock,
-                    requested_robux=order.requested_robux,
-                    minimum_purchase_rate=self._minimum_purchase_rate,
-                    maximum_purchase_rate=effective_purchase_rate(order, now),
+                active = await MarketplaceOrderRepository(session).get_active_for_client_order(
+                    order.id
                 )
-                if selected is None:
-                    return ActionResultDTO(
-                        message="No suitable stock for the fast PreOrder trigger."
+                if active is not None:
+                    active_marketplace_id = active.id
+                else:
+                    now = self._clock()
+                    selected = _select_stock(
+                        stock,
+                        requested_robux=order.requested_robux,
+                        minimum_purchase_rate=self._minimum_purchase_rate,
+                        maximum_purchase_rate=effective_purchase_rate(order, now),
                     )
+                    if selected is None:
+                        return ActionResultDTO(
+                            message="No suitable stock for the fast PreOrder trigger."
+                        )
             elif order.current_status is ClientOrderStatus.PURCHASING:
                 active = await MarketplaceOrderRepository(session).get_active_for_client_order(
                     order.id
@@ -571,6 +596,8 @@ class MarketplaceWorkflows:
                 return ActionResultDTO(message="Active purchase retained without fast requeue.")
             else:
                 return ActionResultDTO(message="Order is not eligible for the fast stock trigger.")
+        if active_marketplace_id is not None:
+            return await self.synchronize_marketplace_order(active_marketplace_id)
         result = await self.start_purchase(order_id, stock)
         logger.info(
             "fast_stock_trigger",
@@ -581,6 +608,63 @@ class MarketplaceWorkflows:
             },
         )
         return result
+
+    async def force_close(self, order_id: UUID, *, operator_id: int) -> ActionResultDTO:
+        """Stop local marketplace automation without calling RBXCrate."""
+        try:
+            async with self._sessions.begin() as session:
+                orders = ClientOrderRepository(session)
+                order = await orders.get_for_update(order_id)
+                if order is None:
+                    raise NotFoundError("Client Order")
+                if order.current_status is ClientOrderStatus.FORCE_CLOSED:
+                    return ActionResultDTO(
+                        message=_force_closed_message(order.id),
+                        order_id=order.id,
+                    )
+                if order.current_status not in {
+                    ClientOrderStatus.PREORDER,
+                    ClientOrderStatus.PURCHASING,
+                }:
+                    raise DomainConflictError(
+                        "Only a waiting or purchasing order can be force closed"
+                    )
+
+                marketplace_orders = MarketplaceOrderRepository(session)
+                active = await marketplace_orders.get_active_for_client_order_for_update(order.id)
+                previous_status = order.current_status.value
+                marketplace_order_id = None if active is None else active.id
+                pending_retry_tasks_cancelled = int(
+                    order.current_status is ClientOrderStatus.PREORDER
+                    or order.automatic_requeue_enabled is not False
+                ) + int(active is not None)
+                now = self._clock()
+                if active is not None:
+                    force_close_marketplace_order(active, now=now)
+                    await marketplace_orders.save(active)
+                force_close_order(order, now)
+                await orders.save(order)
+                logger.warning(
+                    "marketplace_order_force_closed",
+                    extra={
+                        "order_id": str(order.id),
+                        "customer_id": str(order.customer_id),
+                        "operator_id": operator_id,
+                        "previous_status": previous_status,
+                        "marketplace_order_id": (
+                            None if marketplace_order_id is None else str(marketplace_order_id)
+                        ),
+                        "pending_retry_tasks_cancelled": pending_retry_tasks_cancelled,
+                    },
+                )
+        except (DomainValidationError, DomainConflictError) as error:
+            raise ConflictError(str(error)) from error
+        except IntegrityError as error:
+            raise ConflictError("The order changed concurrently; please refresh") from error
+        return ActionResultDTO(
+            message=_force_closed_message(order_id),
+            order_id=order_id,
+        )
 
     async def _requeue_active(
         self,
@@ -1295,6 +1379,16 @@ def _cached_sync_result(
         price=None,
         error_reason=None,
         error_message=None,
+    )
+
+
+def _force_closed_message(order_id: UUID) -> str:
+    return (
+        "🔒 Marketplace order force closed\n\n"
+        f"Order: #{order_id.hex[:8].upper()}\n\n"
+        "All automatic retries, synchronization jobs, and stock triggers have been stopped."
+        "\n\nRBXCrate order was not cancelled remotely. Only local automation for this order "
+        "has been terminated."
     )
 
 

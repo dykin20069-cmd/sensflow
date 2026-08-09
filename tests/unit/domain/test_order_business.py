@@ -16,6 +16,7 @@ from sensflow.domain.order.service import (
     edit_draft,
     effective_purchase_rate,
     enter_preorder,
+    force_close_order,
 )
 from sensflow.domain.order.state_machine import ALLOWED_TRANSITIONS, validate_transition
 from sensflow.domain.order.timeline import create_timeline_event
@@ -112,6 +113,27 @@ def test_cancellation_is_terminal_and_preserves_the_order() -> None:
     cancel_order(client_order, NOW)
 
     assert client_order.current_status is ClientOrderStatus.CANCELLED
+    assert client_order.cancelled_at == NOW
+    with pytest.raises(DomainConflictError):
+        cancel_order(client_order, NOW)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [ClientOrderStatus.PREORDER, ClientOrderStatus.PURCHASING],
+)
+def test_force_close_is_terminal_and_disables_local_retries(status: ClientOrderStatus) -> None:
+    client_order = order(status)
+    client_order.automatic_requeue_enabled = True
+    client_order.last_requeue_at = NOW - timedelta(seconds=5)
+    client_order.requeue_attempts = 7
+
+    force_close_order(client_order, NOW)
+
+    assert client_order.current_status is ClientOrderStatus.FORCE_CLOSED
+    assert client_order.automatic_requeue_enabled is False
+    assert client_order.last_requeue_at is None
+    assert client_order.requeue_attempts == 0
     assert client_order.cancelled_at == NOW
     with pytest.raises(DomainConflictError):
         cancel_order(client_order, NOW)

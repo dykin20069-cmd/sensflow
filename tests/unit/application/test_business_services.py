@@ -654,8 +654,38 @@ def test_repeat_action_is_exposed_only_for_the_supported_cancelled_state() -> No
         ClientOrderStatus.PREORDER,
         ClientOrderStatus.PURCHASING,
         ClientOrderStatus.COMPLETED,
+        ClientOrderStatus.FORCE_CLOSED,
     ):
         assert OrderAction.REPEAT not in _order_actions(status)
+
+
+def test_force_close_action_is_exposed_only_for_waiting_and_purchasing_orders() -> None:
+    assert OrderAction.FORCE_CLOSE in _order_actions(ClientOrderStatus.PREORDER)
+    assert OrderAction.FORCE_CLOSE in _order_actions(ClientOrderStatus.PURCHASING)
+    assert _order_actions(ClientOrderStatus.FORCE_CLOSED) == (OrderAction.TIMELINE,)
+
+
+def test_force_close_service_authorizes_and_delegates_operator_identity() -> None:
+    async def exercise() -> None:
+        order_id = uuid4()
+        workflows = MagicMock()
+        workflows.force_close = AsyncMock(
+            return_value=ActionResultDTO(message="closed", order_id=order_id)
+        )
+        service = OrderApplicationService(
+            TransactionFactory(),
+            marketplace_workflows=workflows,
+            operator_id=42,
+        )
+
+        result = await service.force_close_order(
+            OrderActionCommand(order_id=order_id, operator_id=42)
+        )
+
+        assert result.order_id == order_id
+        workflows.force_close.assert_awaited_once_with(order_id, operator_id=42)
+
+    asyncio.run(exercise())
 
 
 def test_mutating_services_enforce_operator_authorization() -> None:

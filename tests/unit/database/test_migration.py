@@ -18,6 +18,7 @@ def test_migration_chain_has_nullable_customer_identity_revision() -> None:
     revisions = list(scripts.walk_revisions())
 
     assert [item.revision for item in revisions] == [
+        "20260809_0008",
         "20260808_0007",
         "20260808_0006",
         "20260808_0005",
@@ -26,13 +27,14 @@ def test_migration_chain_has_nullable_customer_identity_revision() -> None:
         "20260807_0002",
         "20260806_0001",
     ]
-    assert revisions[0].down_revision == "20260808_0006"
-    assert revisions[1].down_revision == "20260808_0005"
-    assert revisions[2].down_revision == "20260807_0004"
-    assert revisions[3].down_revision == "20260807_0003"
-    assert revisions[4].down_revision == "20260807_0002"
-    assert revisions[5].down_revision == "20260806_0001"
-    assert revisions[6].down_revision is None
+    assert revisions[0].down_revision == "20260808_0007"
+    assert revisions[1].down_revision == "20260808_0006"
+    assert revisions[2].down_revision == "20260808_0005"
+    assert revisions[3].down_revision == "20260807_0004"
+    assert revisions[4].down_revision == "20260807_0003"
+    assert revisions[5].down_revision == "20260807_0002"
+    assert revisions[6].down_revision == "20260806_0001"
+    assert revisions[7].down_revision is None
 
 
 def test_initial_migration_renders_complete_upgrade_sql() -> None:
@@ -94,6 +96,10 @@ def test_initial_migration_renders_complete_upgrade_sql() -> None:
     assert "ADD COLUMN status_check_rate_limit_count INTEGER DEFAULT 0 NOT NULL" in sql
     assert "WHERE marketplace_status = 'active' AND purchase_started_at IS NULL" in sql
     assert "status_check_rate_limit_count >= 0" in sql
+    assert "ALTER TYPE client_order_status ADD VALUE IF NOT EXISTS 'force_closed'" in sql
+    assert "ALTER TYPE marketplace_order_status ADD VALUE IF NOT EXISTS 'force_closed'" in sql
+    assert "current_status IN ('cancelled', 'force_closed')" in sql
+    assert "marketplace_status IN ('cancelled', 'force_closed')" in sql
     assert "CREATE UNIQUE INDEX uq_system_settings_singleton" in sql
     assert sql.count("CREATE FUNCTION reject_protected_row_change()") == 1
     for trigger_name in (
@@ -210,3 +216,21 @@ def test_v2_1_3_downgrade_removes_only_marketplace_request_guards() -> None:
     assert "DROP COLUMN status_check_backoff_until" in sql
     assert "DROP COLUMN status_check_rate_limit_count" in sql
     assert "client_orders" not in sql
+
+
+def test_force_close_downgrade_is_guarded_and_rebuilds_both_enums() -> None:
+    output = StringIO()
+
+    command.downgrade(
+        alembic_config(output),
+        "20260809_0008:20260808_0007",
+        sql=True,
+    )
+
+    sql = output.getvalue()
+    assert "Cannot downgrade while FORCE_CLOSED Client or Marketplace Orders exist" in sql
+    assert "CREATE TYPE client_order_status AS ENUM" in sql
+    assert "CREATE TYPE marketplace_order_status AS ENUM" in sql
+    assert "DROP TYPE client_order_status_force_closed" in sql
+    assert "DROP TYPE marketplace_order_status_force_closed" in sql
+    assert "CREATE UNIQUE INDEX uq_marketplace_orders_one_active_per_client_order" in sql

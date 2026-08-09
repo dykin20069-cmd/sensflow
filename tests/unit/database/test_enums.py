@@ -19,9 +19,9 @@ from sensflow.infrastructure.database.enums import (
     [
         (
             ClientOrderStatus,
-            ["draft", "preorder", "purchasing", "completed", "cancelled"],
+            ["draft", "preorder", "purchasing", "completed", "cancelled", "force_closed"],
         ),
-        (MarketplaceOrderStatus, ["active", "completed", "cancelled"]),
+        (MarketplaceOrderStatus, ["active", "completed", "cancelled", "force_closed"]),
         (
             TimelineEventType,
             [

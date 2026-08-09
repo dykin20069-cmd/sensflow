@@ -74,6 +74,8 @@ _STATUS_MAP = {
     "queued": MarketplaceOrderStatus.ACTIVE,
     "processing": MarketplaceOrderStatus.ACTIVE,
     "completed": MarketplaceOrderStatus.COMPLETED,
+    "delivered": MarketplaceOrderStatus.COMPLETED,
+    "finished": MarketplaceOrderStatus.COMPLETED,
     "cancelled": MarketplaceOrderStatus.CANCELLED,
     "error": MarketplaceOrderStatus.CANCELLED,
 }

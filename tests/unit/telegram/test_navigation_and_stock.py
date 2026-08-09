@@ -188,22 +188,28 @@ def test_active_and_preorder_screens_expose_direct_production_actions() -> None:
     preorder_keyboard = order_details_keyboard(
         uuid4(),
         ClientOrderStatus.PREORDER,
-        (OrderAction.START_PURCHASE, OrderAction.FORCE_PURCHASE),
+        (OrderAction.START_PURCHASE, OrderAction.FORCE_PURCHASE, OrderAction.FORCE_CLOSE),
     )
     preorder_labels = [button.text for row in preorder_keyboard.inline_keyboard for button in row]
     assert "📦 Retry Stock Check" in preorder_labels
     assert "🚀 Force Create Marketplace Order" in preorder_labels
+    assert "🔒 Force Close" in preorder_labels
 
     active_keyboard = order_details_keyboard(
         uuid4(),
         ClientOrderStatus.PURCHASING,
-        (OrderAction.MANUAL_REORDER, OrderAction.DISABLE_AUTO_REQUEUE),
+        (
+            OrderAction.MANUAL_REORDER,
+            OrderAction.DISABLE_AUTO_REQUEUE,
+            OrderAction.FORCE_CLOSE,
+        ),
     )
     active_action_labels = [
         button.text for row in active_keyboard.inline_keyboard for button in row
     ]
     assert "🔄 Requeue Now" in active_action_labels
     assert "⏸ Disable Auto Requeue" in active_action_labels
+    assert "🔒 Force Close" in active_action_labels
 
     cancelled_keyboard = order_details_keyboard(
         uuid4(),
@@ -212,6 +218,16 @@ def test_active_and_preorder_screens_expose_direct_production_actions() -> None:
     )
     cancelled_labels = [button.text for row in cancelled_keyboard.inline_keyboard for button in row]
     assert "🔁 Repeat order" in cancelled_labels
+
+    force_closed_keyboard = order_details_keyboard(
+        uuid4(),
+        ClientOrderStatus.FORCE_CLOSED,
+        (OrderAction.TIMELINE,),
+    )
+    force_closed_labels = [
+        button.text for row in force_closed_keyboard.inline_keyboard for button in row
+    ]
+    assert force_closed_labels == ["📋 Details", "⬅️ Back", "🏠 Home"]
 
 
 def test_home_clears_state_and_close_deletes_the_screen() -> None:

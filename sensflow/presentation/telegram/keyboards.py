@@ -274,6 +274,7 @@ def order_details_keyboard(
             OrderCallbackAction.TOGGLE_AUTO_REQUEUE,
         ),
         OrderAction.CANCEL: ("❌ Cancel", OrderCallbackAction.CANCEL),
+        OrderAction.FORCE_CLOSE: ("🔒 Force Close", OrderCallbackAction.FORCE_CLOSE),
         OrderAction.REFRESH: ("🔄 Refresh Status", OrderCallbackAction.REFRESH),
         OrderAction.REPEAT: ("🔁 Repeat order", OrderCallbackAction.REPEAT),
         OrderAction.TIMELINE: ("📋 Details", OrderCallbackAction.TIMELINE),
@@ -294,11 +295,14 @@ def order_details_keyboard(
         text="🏠 Home",
         callback_data=NavigationCallback(action=NavigationAction.HOME),
     )
-    builder.button(
-        text="❌ Close",
-        callback_data=OrderCallback(action=OrderCallbackAction.LIST, status=status),
-    )
-    builder.adjust(1, 2, 1)
+    if status is not ClientOrderStatus.FORCE_CLOSED:
+        builder.button(
+            text="❌ Close",
+            callback_data=OrderCallback(action=OrderCallbackAction.LIST, status=status),
+        )
+        builder.adjust(1, 2, 1)
+    else:
+        builder.adjust(1, 2)
     return builder.as_markup()
 
 

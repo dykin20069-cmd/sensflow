@@ -333,6 +333,7 @@ async def receive_draft_place_id(
                 OrderCallbackAction.MANUAL_REORDER,
                 OrderCallbackAction.TOGGLE_AUTO_REQUEUE,
                 OrderCallbackAction.CANCEL,
+                OrderCallbackAction.FORCE_CLOSE,
                 OrderCallbackAction.REFRESH,
                 OrderCallbackAction.REPEAT,
             }
@@ -359,6 +360,7 @@ async def handle_order_action(
         OrderCallbackAction.MANUAL_REORDER: orders.manual_reorder,
         OrderCallbackAction.TOGGLE_AUTO_REQUEUE: orders.toggle_auto_requeue,
         OrderCallbackAction.CANCEL: orders.cancel_order,
+        OrderCallbackAction.FORCE_CLOSE: orders.force_close_order,
         OrderCallbackAction.REFRESH: orders.refresh_order,
         OrderCallbackAction.REPEAT: orders.repeat_order,
     }

@@ -248,7 +248,7 @@ def test_marketplace_order_repository_exposes_active_external_and_history_querie
         unfinished_sql = sql(session.scalars.await_args.args[0])
         assert "JOIN client_orders" in unfinished_sql
         assert "marketplace_orders.marketplace_status = 'completed'" in unfinished_sql
-        assert "client_orders.current_status = 'purchasing'" in unfinished_sql
+        assert "client_orders.current_status IN ('preorder', 'purchasing')" in unfinished_sql
 
     asyncio.run(exercise())
 

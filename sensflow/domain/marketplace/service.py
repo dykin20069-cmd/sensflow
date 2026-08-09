@@ -99,3 +99,15 @@ def cancel_marketplace_order(
     )
     order.marketplace_status = MarketplaceOrderStatus.CANCELLED
     order.cancelled_at = now
+
+
+def force_close_marketplace_order(order: MarketplaceOrder, *, now: datetime) -> None:
+    """Close one active attempt locally without contacting the marketplace."""
+    if order.marketplace_status is not MarketplaceOrderStatus.ACTIVE:
+        raise DomainConflictError("Only an active Marketplace Order can be force closed")
+    order.marketplace_status = MarketplaceOrderStatus.FORCE_CLOSED
+    order.completed_at = None
+    order.cancelled_at = now
+    order.last_status_check_at = None
+    order.status_check_backoff_until = None
+    order.status_check_rate_limit_count = 0

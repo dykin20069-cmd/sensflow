@@ -114,6 +114,15 @@ def cancel_order(order: ClientOrder, now: datetime) -> None:
     order.cancelled_at = now
 
 
+def force_close_order(order: ClientOrder, now: datetime) -> None:
+    """Terminate all local automation for a waiting or purchasing order."""
+    _transition(order, ClientOrderStatus.FORCE_CLOSED)
+    order.automatic_requeue_enabled = False
+    order.last_requeue_at = None
+    order.requeue_attempts = 0
+    order.cancelled_at = now
+
+
 def complete_order(
     order: ClientOrder,
     *,

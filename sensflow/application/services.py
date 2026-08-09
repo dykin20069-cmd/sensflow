@@ -160,6 +160,7 @@ def _order_actions(
             OrderAction.START_PURCHASE,
             OrderAction.FORCE_PURCHASE,
             OrderAction.CANCEL,
+            OrderAction.FORCE_CLOSE,
             OrderAction.TIMELINE,
         )
     if status is ClientOrderStatus.PURCHASING:
@@ -171,6 +172,7 @@ def _order_actions(
                 else OrderAction.ENABLE_AUTO_REQUEUE
             ),
             OrderAction.CANCEL,
+            OrderAction.FORCE_CLOSE,
             OrderAction.REFRESH,
             OrderAction.TIMELINE,
         )
@@ -264,7 +266,9 @@ def _order_detail(
             None if current_attempt is None else current_attempt.marketplace_status
         ),
         marketplace_order_reference=(
-            None if current_attempt is None else current_attempt.rbxcreate_order_id
+            None
+            if current_attempt is None or order.current_status is ClientOrderStatus.FORCE_CLOSED
+            else current_attempt.rbxcreate_order_id
         ),
         waiting_seconds=(
             None
@@ -950,6 +954,16 @@ class OrderApplicationService:
         if self._marketplace_workflows is not None:
             return await self._marketplace_workflows.cancel_active_purchase(command.order_id)
         return await self._cancel(command, draft_only=False)
+
+    async def force_close_order(self, command: OrderActionCommand) -> ActionResultDTO:
+        """Terminate local automation without making a marketplace API request."""
+        _authorize(command.operator_id, self._operator_id)
+        if self._marketplace_workflows is None:
+            raise FeatureUnavailableError("Marketplace force close")
+        return await self._marketplace_workflows.force_close(
+            command.order_id,
+            operator_id=command.operator_id,
+        )
 
     async def _cancel(
         self,

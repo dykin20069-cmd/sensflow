@@ -325,7 +325,16 @@ def render_order_card(order: OrderDetailDTO, notice: str | None = None) -> Scree
         if not order.preferred_mode_enabled
         else None
     )
-    if order.status is ClientOrderStatus.PURCHASING:
+    if order.status is ClientOrderStatus.FORCE_CLOSED:
+        title = "🔒 Force closed"
+        body = (
+            f"👤 {escape_text(order.customer_username)}\n"
+            f"💰 {format_robux(order.requested_robux)}\n"
+            f"🎮 <code>{order.current_place_id}</code>\n"
+            "Status: 🔒 Force closed\n"
+            "Local marketplace automation is stopped."
+        )
+    elif order.status is ClientOrderStatus.PURCHASING:
         title = "📦 Active Order"
         body = (
             f"👤 {escape_text(order.customer_username)}\n"

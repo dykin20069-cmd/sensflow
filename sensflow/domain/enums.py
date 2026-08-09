@@ -30,12 +30,14 @@ class ClientOrderStatus(StrEnum):
     PURCHASING = "purchasing"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+    FORCE_CLOSED = "force_closed"
 
 
 class MarketplaceOrderStatus(StrEnum):
     ACTIVE = "active"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+    FORCE_CLOSED = "force_closed"
 
 
 class TimelineEventType(StrEnum):

@@ -239,8 +239,8 @@ class ClientOrder(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="completed_order_fields",
         ),
         CheckConstraint(
-            "(current_status = 'cancelled' AND cancelled_at IS NOT NULL) "
-            "OR (current_status <> 'cancelled' AND cancelled_at IS NULL)",
+            "(current_status IN ('cancelled', 'force_closed') AND cancelled_at IS NOT NULL) "
+            "OR (current_status NOT IN ('cancelled', 'force_closed') AND cancelled_at IS NULL)",
             name="cancelled_order_timestamp",
         ),
         Index("ix_client_orders_customer_id", "customer_id"),
@@ -342,6 +342,8 @@ class MarketplaceOrder(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "OR (marketplace_status = 'completed' AND completed_at IS NOT NULL "
             "AND cancelled_at IS NULL AND remaining_robux = 0) "
             "OR (marketplace_status = 'cancelled' AND cancelled_at IS NOT NULL "
+            "AND completed_at IS NULL) "
+            "OR (marketplace_status = 'force_closed' AND cancelled_at IS NOT NULL "
             "AND completed_at IS NULL)",
             name="status_timestamps_consistent",
         ),

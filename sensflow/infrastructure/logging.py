@@ -35,6 +35,9 @@ _STRUCTURED_FIELDS = (
     "attempt_number",
     "delay_seconds",
     "estimated_remaining_safe_attempts",
+    "operator_id",
+    "previous_status",
+    "pending_retry_tasks_cancelled",
     "reason",
 )
 

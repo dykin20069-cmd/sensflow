@@ -12,17 +12,24 @@ ALLOWED_TRANSITIONS: dict[ClientOrderStatus, frozenset[ClientOrderStatus]] = {
         }
     ),
     ClientOrderStatus.PREORDER: frozenset(
-        {ClientOrderStatus.PURCHASING, ClientOrderStatus.CANCELLED}
+        {
+            ClientOrderStatus.PURCHASING,
+            ClientOrderStatus.COMPLETED,
+            ClientOrderStatus.CANCELLED,
+            ClientOrderStatus.FORCE_CLOSED,
+        }
     ),
     ClientOrderStatus.PURCHASING: frozenset(
         {
             ClientOrderStatus.PREORDER,
             ClientOrderStatus.COMPLETED,
             ClientOrderStatus.CANCELLED,
+            ClientOrderStatus.FORCE_CLOSED,
         }
     ),
     ClientOrderStatus.COMPLETED: frozenset(),
     ClientOrderStatus.CANCELLED: frozenset(),
+    ClientOrderStatus.FORCE_CLOSED: frozenset(),
 }
 
 

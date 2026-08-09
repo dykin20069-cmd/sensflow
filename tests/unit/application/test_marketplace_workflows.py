@@ -752,6 +752,107 @@ def test_operator_cancel_cannot_touch_a_purchase_younger_than_five_seconds(
     asyncio.run(scenario())
 
 
+def test_force_close_stops_local_automation_without_rbxcrate_calls(
+    monkeypatch: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PURCHASING)
+        order.automatic_requeue_enabled = True
+        order.last_requeue_at = NOW - timedelta(seconds=30)
+        order.requeue_attempts = 6
+        attempt = _attempt(order)
+        attempt.last_status_check_at = NOW - timedelta(seconds=5)
+        attempt.status_check_backoff_until = NOW + timedelta(seconds=20)
+        attempt.status_check_rate_limit_count = 2
+        _wire(monkeypatch, customer=customer, order=order, attempt=attempt)
+        bridge = Bridge()
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        with caplog.at_level(logging.WARNING):
+            result = await workflows.force_close(order.id, operator_id=123)
+
+        assert result.order_id == order.id
+        assert "Marketplace order force closed" in result.message
+        assert order.current_status is ClientOrderStatus.FORCE_CLOSED
+        assert order.automatic_requeue_enabled is False
+        assert order.last_requeue_at is None
+        assert order.requeue_attempts == 0
+        assert attempt.marketplace_status is MarketplaceOrderStatus.FORCE_CLOSED
+        assert attempt.status_check_backoff_until is None
+        assert attempt.status_check_rate_limit_count == 0
+        assert bridge.sync_calls == 0
+        assert bridge.cancel_calls == []
+        assert bridge.create_calls == []
+        record = next(
+            item for item in caplog.records if item.message == "marketplace_order_force_closed"
+        )
+        assert record.order_id == str(order.id)
+        assert record.customer_id == str(customer.id)
+        assert record.operator_id == 123
+        assert record.previous_status == "purchasing"
+        assert record.marketplace_order_id == str(attempt.id)
+        assert record.pending_retry_tasks_cancelled == 2
+
+    asyncio.run(scenario())
+
+
+def test_fast_trigger_ignores_force_closed_order(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.FORCE_CLOSED)
+        _wire(monkeypatch, customer=customer, order=order)
+        bridge = Bridge(stock=(MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),))
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        result = await workflows.fast_requeue(order.id, bridge.stock, cooldown_seconds=1)
+
+        assert result.message == "Terminal order ignored by fast stock trigger."
+        assert bridge.sync_calls == 0
+        assert bridge.cancel_calls == []
+        assert bridge.create_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_fast_trigger_synchronizes_zombie_preorder_before_requeue(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        customer = _customer()
+        order = _order(customer, ClientOrderStatus.PREORDER)
+        attempt = _attempt(order)
+        attempt.purchase_started_at = NOW - timedelta(seconds=30)
+        _wire(monkeypatch, customer=customer, order=order, attempt=attempt)
+        bridge = Bridge(
+            sync=MarketplaceSyncResult(
+                attempt.rbxcreate_order_id,
+                MarketplaceOrderStatus.COMPLETED,
+                attempt.requested_robux,
+                0,
+                None,
+                Decimal("10.00"),
+                None,
+                None,
+            )
+        )
+        workflows = MarketplaceWorkflows(Sessions(), bridge, clock=lambda: NOW)  # type: ignore[arg-type]
+
+        result = await workflows.fast_requeue(
+            order.id,
+            (MarketplaceStock(Decimal("2.00"), 2, 5000, 5000),),
+            cooldown_seconds=1,
+        )
+
+        assert result.message == "Order completed successfully."
+        assert bridge.sync_calls == 1
+        assert bridge.cancel_calls == []
+        assert bridge.create_calls == []
+        assert attempt.marketplace_status is MarketplaceOrderStatus.COMPLETED
+        assert order.current_status is ClientOrderStatus.COMPLETED
+
+    asyncio.run(scenario())
+
+
 def test_fast_trigger_starts_preorder_immediately_from_existing_stock_snapshot(
     monkeypatch: Any,
     caplog: pytest.LogCaptureFixture,

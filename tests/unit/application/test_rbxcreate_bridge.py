@@ -88,6 +88,8 @@ def create_response() -> CreateGamepassOrderResponse:
         ("Queued", MarketplaceOrderStatus.ACTIVE),
         ("Processing", MarketplaceOrderStatus.ACTIVE),
         ("Completed", MarketplaceOrderStatus.COMPLETED),
+        ("Delivered", MarketplaceOrderStatus.COMPLETED),
+        ("Finished", MarketplaceOrderStatus.COMPLETED),
         ("Cancelled", MarketplaceOrderStatus.CANCELLED),
         ("Error", MarketplaceOrderStatus.CANCELLED),
     ],

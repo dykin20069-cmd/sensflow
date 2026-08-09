@@ -13,6 +13,7 @@ from sensflow.domain.marketplace.service import (
     cancel_marketplace_order,
     complete_marketplace_order,
     create_marketplace_order,
+    force_close_marketplace_order,
     update_marketplace_progress,
 )
 from sensflow.infrastructure.database.models import ClientOrder, MarketplaceOrder
@@ -85,3 +86,18 @@ def test_marketplace_completion_and_cancellation_are_terminal() -> None:
     )
     assert cancelled.marketplace_status is MarketplaceOrderStatus.CANCELLED
     assert cancelled.cancelled_at == NOW
+
+
+def test_force_close_clears_synchronization_retry_state() -> None:
+    attempt = active_attempt()
+    attempt.last_status_check_at = NOW
+    attempt.status_check_backoff_until = NOW
+    attempt.status_check_rate_limit_count = 3
+
+    force_close_marketplace_order(attempt, now=NOW)
+
+    assert attempt.marketplace_status is MarketplaceOrderStatus.FORCE_CLOSED
+    assert attempt.cancelled_at == NOW
+    assert attempt.last_status_check_at is None
+    assert attempt.status_check_backoff_until is None
+    assert attempt.status_check_rate_limit_count == 0

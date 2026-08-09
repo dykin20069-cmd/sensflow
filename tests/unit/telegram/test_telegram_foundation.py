@@ -69,6 +69,12 @@ def test_callback_payloads_are_typed_and_fit_telegram_limit() -> None:
         MainSection.ORDERS
     )
     assert NavigationCallback(action=NavigationAction.HOME).pack() == "n:home:main"
+    force_close = OrderCallback(
+        action=OrderCallbackAction.FORCE_CLOSE,
+        order_id=order_id,
+    ).pack()
+    assert len(force_close.encode()) <= 64
+    assert OrderCallback.unpack(force_close).action is OrderCallbackAction.FORCE_CLOSE
 
 
 def test_main_menu_and_fsm_cover_documented_skeleton() -> None:
@@ -183,6 +189,38 @@ def test_order_card_shows_daily_marketplace_attempts_and_limit_warning() -> None
     assert "🟠 Safe mode enabled" in screen.text
     assert "⚠️ Marketplace daily limit almost exhausted" in screen.text
     assert "Use Requeue Now manually only if necessary." in screen.text
+
+
+def test_force_closed_card_hides_marketplace_retry_and_cancel_actions() -> None:
+    order = OrderDetailDTO(
+        id=uuid4(),
+        customer_username="builder",
+        status=ClientOrderStatus.FORCE_CLOSED,
+        requested_robux=286,
+        customer_receives=200,
+        current_place_id=2,
+        marketplace_rate_limit=Decimal("4.5"),
+        marketplace_cost=None,
+        marketplace_commission=None,
+        final_cost_usd=None,
+        final_cost_local_currency=None,
+        created_at=datetime.now(UTC),
+        completed_at=None,
+        timeline=(),
+        marketplace_order_reference=None,
+        automatic_requeue_enabled=False,
+        available_actions=(OrderAction.TIMELINE,),
+    )
+
+    screen = render_order_card(order)
+    labels = [button.text for row in screen.reply_markup.inline_keyboard for button in row]
+
+    assert "🔒 Force closed" in screen.text
+    assert "Status: 🔒 Force closed" in screen.text
+    assert labels == ["📋 Details", "⬅️ Back", "🏠 Home"]
+    assert "Retry Stock Check" not in labels
+    assert "Force Create Marketplace" not in labels
+    assert "Cancel" not in labels
 
 
 def test_error_presentation_is_safe_and_specific() -> None:

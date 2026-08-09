@@ -54,6 +54,7 @@ class OrderCallbackAction(StrEnum):
     MANUAL_REORDER = "reorder"
     TOGGLE_AUTO_REQUEUE = "auto_requeue"
     CANCEL = "cancel"
+    FORCE_CLOSE = "force_close"
     REFRESH = "refresh"
     REPEAT = "repeat"
     TIMELINE = "timeline"

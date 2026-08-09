@@ -119,7 +119,9 @@ class MarketplaceOrderRepository(Repository[MarketplaceOrder]):
             .join(MarketplaceOrder.client_order)
             .where(
                 MarketplaceOrder.marketplace_status == MarketplaceOrderStatus.COMPLETED,
-                ClientOrder.current_status == ClientOrderStatus.PURCHASING,
+                ClientOrder.current_status.in_(
+                    (ClientOrderStatus.PREORDER, ClientOrderStatus.PURCHASING)
+                ),
             )
             .order_by(MarketplaceOrder.completed_at, MarketplaceOrder.id)
             .limit(limit)
